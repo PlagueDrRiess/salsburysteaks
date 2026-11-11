@@ -4,6 +4,19 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.18
+
+### Better problem reports (thanks to IP050)
+- **REPORT** (About page) now packs all five logs instead of two, since after a restart the crashed run is no longer
+  the newest one, plus Native Vulkan's note of what the driver was building.
+- When a log holds a crash, the zip gets a `crash.txt` first: the crash itself with the lines before it, without the
+  per-call chatter of a detailed log.
+- Your Windows user name is taken out of every path in the files packed.
+- When your last run crashed, the launcher tells you once and points at REPORT.
+- Nothing is sent anywhere: as before, the zip is made in the game folder and the bug form opens for you to attach it.
+- IP050's standalone packer, `tools/MP4-Report.ps1`, is in the repository for anyone who wants the Windows Event
+  Viewer entry as well. It is not part of the download.
+
 ## 2026.11.17
 
 ### Ultrawide: Picture shape (on trial)
