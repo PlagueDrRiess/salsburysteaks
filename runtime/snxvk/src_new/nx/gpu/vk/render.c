@@ -2517,6 +2517,33 @@ retry:
         LOG_LIMIT(1, "vulkan: a draw with rasterization off stores into images: drawn without targets or a fragment "
                      "program\n");
     }
+    { /* test only: SNX_FS_LOG logs each fragment program at its first draw (to find which one draws a fault);
+         SNX_FS_SKIP=hash,hash... leaves out the draws of those programs */
+        static int on = -1, nseen, nskip;
+        static u64 seen[4096], skip[256];
+        if (on < 0) {
+            const char* e = getenv("SNX_FS_SKIP");
+            on = getenv("SNX_FS_LOG") != NULL;
+            while (e && *e && nskip < 256) {
+                char* end;
+                skip[nskip++] = strtoull(e, &end, 16);
+                e = *end == ',' ? end + 1 : NULL;
+            }
+        }
+        if (fs && (on || nskip)) {
+            int known = 0;
+            for (int i = 0; i < nskip; i++)
+                if (skip[i] == fs->hash) return;
+            for (int i = 0; on && i < nseen && !known; i++) known = seen[i] == fs->hash;
+            if (on && !known && nseen < 4096) {
+                seen[nseen++] = fs->hash;
+                LOG("vulkan: fs diag: first draw with fragment program %016llx (vertex program %016llx, blend %u, "
+                    "factors %x %x %x %x, %u targets, count %u)\n",
+                    (unsigned long long)fs->hash, (unsigned long long)vs->hash, r[0x4D8] & 1, r[0x4D1], r[0x4D2],
+                    r[0x4D4], r[0x4D6], n, count);
+            }
+        }
+    }
     for (u32 i = 0; i < n; i++)
         if (trace_target(rt[i]))
             LOG_LIMIT(64,

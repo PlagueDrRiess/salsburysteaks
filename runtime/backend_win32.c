@@ -532,7 +532,14 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   test_input_load();u32 frame=(u32)g_frames;
   { static int done; const char*se; if(!done&&(se=getenv("SWR_TEST_SETENV"))&&*se){ u32 at=(u32)strtoul(se,NULL,10); const char*kv=strchr(se,':');   /* test only: "FRAME:NAME=VALUE" sets an env var at that guest frame */
       if(!kv){done=1;} else if(frame>=at){ char k[64]; const char*eq=strchr(kv+1,'='); if(eq&&eq-kv-1<64){ memcpy(k,kv+1,eq-kv-1); k[eq-kv-1]=0; SetEnvironmentVariableA(k,eq+1); { char pe[200]; snprintf(pe,sizeof pe,"%s=%s",k,eq+1); _putenv(pe); } LOG("test: frame %u set %s=%s\n",frame,k,eq+1); } done=1; } } }
-  if(test_replay){while(test_i+1<test_n&&test_inputs[test_i+1].frame<=frame)test_i++;TestInput*v=&test_inputs[test_i];*b=v->buttons;*lx=v->lx;*ly=v->ly;*rx=v->rx;*ry=v->ry;}
+  if(test_replay){while(test_i+1<test_n&&test_inputs[test_i+1].frame<=frame)test_i++;TestInput*v=&test_inputs[test_i];
+    /* the player takes over a replay by touching the controller or the keys, and the replay carries on three seconds
+       after the last touch (its own clock keeps running meanwhile, so it resumes where it would have been) */
+    static u64 touched; static int taken; u64 now=plat_ns();
+    int touch= *b!=0 || *lx>12000 || *lx< -12000 || *ly>12000 || *ly< -12000 || *rx>12000 || *rx< -12000 || *ry>12000 || *ry< -12000;
+    if(touch){ touched=now; if(!taken){ taken=1; LOG("test input: the player took over at guest frame %u\n",frame); } }
+    else if(taken && now-touched>3000000000ull){ taken=0; LOG("test input: the replay carries on at guest frame %u\n",frame); }
+    if(!taken){*b=v->buttons;*lx=v->lx;*ly=v->ly;*rx=v->rx;*ry=v->ry;}}
   if(test_record&&(!test_recorded||*b!=test_previous.buttons||*lx!=test_previous.lx||*ly!=test_previous.ly||*rx!=test_previous.rx||*ry!=test_previous.ry)){
     fprintf(test_record,"%u,%llx,%d,%d,%d,%d\n",frame,(unsigned long long)*b,*lx,*ly,*rx,*ry);fflush(test_record);
     test_previous=(TestInput){frame,*b,*lx,*ly,*rx,*ry};test_recorded=1;

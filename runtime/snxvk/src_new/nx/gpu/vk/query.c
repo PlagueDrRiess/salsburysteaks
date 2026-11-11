@@ -124,6 +124,40 @@ static u64 live_oldest(void) {
         if (g_qc[i].used && g_qc[i].started && live_from(&g_qc[i]) < oldest) oldest = live_from(&g_qc[i]);
     return oldest;
 }
+/* Where the copies of the segments' results were recorded: segments below upto are in g_qres once submit sub is done. */
+static struct {
+    u64 upto, sub;
+} g_qmark[8];
+static u32 g_qmarks;
+/* A counter whose game reports seldom (Metroid Prime 4 reads its flares' counts only while one is on screen) would
+   outgrow the ring between two reports, 4096 passes being about two seconds, and its reports were made up from then
+   until a reset that never comes: ever-growing numbers, which that game draws its glows with (the whole screen went
+   white). The segments already counted are added to the counter's sum here instead, as a report would, and their slots
+   freed: the next report adds only what came after. Counters with reports still queued are left as they are. */
+static void query_fold(void) {
+    u64 done = vk_last_submit(), upto = 0, sub = 0;
+    for (u32 i = 0; i < g_qmarks && i < 8; i++) /* the newest copy one submit back, which the GPU has most likely run */
+        if (g_qmark[i].sub + 1 <= done && g_qmark[i].upto > upto) upto = g_qmark[i].upto, sub = g_qmark[i].sub;
+    if (!upto)
+        for (u32 i = 0; i < g_qmarks && i < 8; i++)
+            if (g_qmark[i].sub <= done && g_qmark[i].upto > upto) upto = g_qmark[i].upto, sub = g_qmark[i].sub;
+    if (!upto) return;
+    vk_wait_submit(sub);
+    vmaInvalidateAllocation(g_vk.vma, g_qmem, 0, VK_WHOLE_SIZE);
+    for (int i = 0; i < QCH; i++) {
+        QCounter* c = &g_qc[i];
+        if (!c->used || !c->started || c->bad || c->whead != c->wtail) continue;
+        if (c->sum_first != c->first) {
+            c->sum_first = c->sum_end = c->first;
+            c->sum = 0;
+        }
+        u64 end = upto < g_q.copied ? upto : g_q.copied;
+        for (u64 s = c->sum_end; s < end; s++)
+            if (g_qown[s % QN] == i + 1) c->sum += snx_le64(g_qres[s % QN]) * g_qmul[s % QN];
+        if (end > c->sum_end) c->sum_end = end;
+        if (end > c->reported) c->reported = end;
+    }
+}
 /* the guest sample count of an MsaaMode (3D 0x574): 1x1, 2x1, 2x2, 4x2, 4x2 D3D, 2x1 D3D, 4x4, and the 2x2 and 4x2
    virtual coverage modes */
 static u32 msaa_samples(u32 mode) {
@@ -141,6 +175,7 @@ void vk_query_draw(VkCommandBuffer cb, u32 chan, u32 msaa_mode) {
         vk_query_pass_end(cb);
     }
     if (!c || !c->started || c->disabled || c->bad) return;
+    if (g_q.next - live_oldest() >= QN / 2) query_fold(); /* well before the ring is full */
     /* the slot is still needed by a report, or its query not reset yet: this epoch counts no further */
     if (g_q.next - live_oldest() >= QN || g_q.next - g_q.copied >= QN) {
         c->bad = 1;
@@ -169,6 +204,8 @@ void vk_query_flush(VkCommandBuffer cb) {
         rec_CmdResetQueryPool(cb, g_qpool, at, n);
         g_q.copied += n;
     }
+    /* this command buffer goes out as the next submit */
+    g_qmark[g_qmarks++ % 8] = (typeof(g_qmark[0])){g_q.copied, vk_last_submit() + 1};
     /* for the host's reads, and for a later copy into a slot of a segment no report read */
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                            .srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT,
@@ -231,6 +268,18 @@ u64 vk_query_value(u32 ci, u64 first, u64 end) {
     if (c->whead != c->wtail) c->wtail++;
     double area = (double)g_vk_scale * (double)g_vk_scale;
     u64 v = area == 1.0 ? c->sum : (u64)((double)c->sum / area + 0.5);
+    { /* test only (SNX_QUERY_LOG): what the reports carry, the first 40 and then every 500th */
+        static int on = -1;
+        static u32 n;
+        static u64 last;
+        if (on < 0) on = getenv("SNX_QUERY_LOG") != NULL;
+        if (on && (n < 40 || n % 500 == 0))
+            LOG("vulkan: query diag: report %u of counter %u: sum %llu (+%llu since the last), segments %llu..%llu\n", n,
+                ci, (unsigned long long)v, (unsigned long long)(v - last), (unsigned long long)first,
+                (unsigned long long)end);
+        n++;
+        last = v;
+    }
     return c->sum && !v ? 1 : v;
 }
 
