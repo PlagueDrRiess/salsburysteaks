@@ -4,6 +4,23 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.19
+
+### AMD Radeon: the crash at start on Vulkan output
+On AMD cards (RX 9070 XT, RX 7800 XT, drivers 26.10.1 and 26.10.2) the game crashed about two seconds after Play
+with "invalid memory access" when the renderer was Vulkan output. The crash is inside AMD's OpenGL driver, in the
+call that hands the first frame to Vulkan. On AMD cards Vulkan output now puts the picture out through OpenGL
+instead, so the game starts. Thanks to everyone who sent a report zip: its `crash.txt` showed this directly.
+If it still crashes for you on **OpenGL**, please send a new report.
+
+### Native Vulkan is back, and its world is lit
+The black world is fixed: the game's lighting volume is filled by a vertex shader, and that shader's writes were
+going nowhere. Native Vulkan is in the launcher again as experimental. Known problems still being worked on:
+- some glow effects and the hit flash can turn the whole screen white;
+- freezes while it builds shaders for the first time, at doors especially;
+- it does not hold 60 FPS as steadily as the other renderers yet.
+OpenGL and Vulkan output remain the renderers to play on.
+
 ## 2026.11.18
 
 ### Better problem reports (thanks to IP050)
