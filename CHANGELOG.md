@@ -4,6 +4,19 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.20
+
+### AMD Radeon: a second attempt at the crash at start (OpenGL and Vulkan output)
+2026.11.19 did not cure it: a new report shows the same crash in AMD's driver on plain OpenGL. In every log it comes
+a moment after the first shader programs loaded on the background compile threads are used. AMD cards now load and
+build every shader on the one OpenGL thread, as NVIDIA cards already do, which is what `shader_threads=-1` did by
+hand. This is not confirmed yet: no AMD card is available to the project, so please report whether the game now
+starts. If it does not, **Native Vulkan** (Graphics > Renderer) starts on AMD cards and is the renderer to try.
+
+### Native Vulkan: F8 and F5 captures
+F8 and F5 now work on Native Vulkan too: the next frame is written to `captures\vk\NNN` with a line for every draw
+and pictures of the render targets (F8: per pass; F5: after every draw). They are for tracking down picture faults.
+
 ## 2026.11.19
 
 ### AMD Radeon: the crash at start on Vulkan output
