@@ -355,8 +355,13 @@ std::string reports_dir() { return join(P.exedir, "reports"); }
 bool make_report(const std::string& info, std::string* out, std::string* err) {
     std::vector<ZipEntry> es; ZipEntry i; i.name = "system.txt"; i.data = info; es.push_back(i);
     const std::string n = P.exename;
-    const std::string files[] = {n + ".log", n + ".previous.log", "performance.txt", "threads.txt", "setup.log", n + ".ini"};
-    for (auto& f : files) { std::string p = join(P.exedir, f); if (!file_exists(p)) continue; ZipEntry e; e.name = f; e.data = read_text(p); es.push_back(e); }
+    // as fe_sys.cpp: all five logs, Native Vulkan's building note, user name out of the paths, the crash on its own first
+    const std::string files[] = {n + ".log", n + ".previous.log", n + ".previous2.log", n + ".previous3.log", n + ".previous4.log",
+                                 "vulkan_native/building.txt", "performance.txt", "threads.txt", "setup.log", n + ".ini", "update.txt"};
+    es[0].data = report_text(es[0].data); bool crash = false;
+    for (auto& f : files) { std::string p = join(P.exedir, f); if (!file_exists(p)) continue; ZipEntry e; e.name = f; e.data = report_text(read_text(p));
+        if (!crash && f.size() > 4 && f.compare(f.size() - 4, 4, ".log") == 0 && f != "setup.log") { std::string x = crash_excerpt(f, e.data); if (!x.empty()) { ZipEntry c; c.name = "crash.txt"; c.data = x; es.insert(es.begin(), c); crash = true; } }
+        es.push_back(e); }
     if (es.size() < 2) { if (err) *err = "There are no logs yet. Start the game once, then try again."; return false; }
     make_dirs(reports_dir());
     std::string path = join(reports_dir(), "MP4-Recomp-report-" + now_stamp() + ".zip");

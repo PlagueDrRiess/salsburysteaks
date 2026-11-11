@@ -84,6 +84,8 @@ MigrateResult migrate(const OldInstall& o, bool settings, bool saves, bool mods,
 // ---------------------------------------------------------------- saves
 bool backup_saves(std::string* out_zip, std::string* err);
 std::string cpu_name();
+std::string report_text(const std::string& data);                                // fe.cpp: the user name taken out of paths
+std::string crash_excerpt(const std::string& name, const std::string& log);      // fe.cpp: the crash block of a log, "" without one
 std::string reports_dir();
 bool make_report(const std::string& info, std::string* out_zip, std::string* err);   // reports\\MP4-Recomp-report-<time>.zip: logs + settings
 std::string backups_dir();

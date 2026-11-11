@@ -370,6 +370,50 @@ static void update_rows(bool banner) {
 static std::string url_enc(const std::string& s) {
     std::string o; for (unsigned char c : s) { if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '.' || c == '_' || c == '~') o += (char)c; else o += fmt("%%%02X", c); } return o;
 }
+// What goes into a report (after IP050's report packer, tools/MP4-Report.ps1): every text file with the Windows or
+// Linux user name taken out of its paths, and crash.txt, the crash block of the newest log that has one with the
+// per-call chatter of a detailed log dropped, so the part that answers the question is the first thing read.
+std::string report_text(const std::string& data) {
+    const char* u = getenv("USERNAME"); if (!u || !*u) u = getenv("USER");
+    std::string user = u ? u : ""; if (user.size() < 3) return data;
+    std::string out; out.reserve(data.size()); size_t i = 0, k;
+    while ((k = data.find(user, i)) != std::string::npos) { out.append(data, i, k - i); out += "<user>"; i = k + user.size(); }
+    out.append(data, i, std::string::npos); return out;
+}
+static bool chatter_line(const std::string& l) {
+    return l.find("] IPC ") != std::string::npos || l.find("] GetInfo ") != std::string::npos || l.find("GetServiceHandle(") != std::string::npos ||
+           l.find("[stub]") != std::string::npos;
+}
+std::string crash_excerpt(const std::string& name, const std::string& log) {
+    size_t k = log.find("*** Crash (signal"); if (k == std::string::npos) return "";
+    std::vector<std::string> before; size_t dropped = 0, i = 0;
+    while (i < k) { size_t e = log.find('\n', i); if (e == std::string::npos || e > k) e = k; std::string l = log.substr(i, e - i); i = e + 1;
+        while (!l.empty() && l.back() == '\r') l.pop_back();
+        if (chatter_line(l)) { dropped++; continue; } before.push_back(l); if (before.size() > 45) before.erase(before.begin()); }
+    std::string out = "The crash in " + name + ", with the 45 lines before it" + (dropped ? fmt(" (%d lines of per-call chatter left out)", (int)dropped) : std::string()) + ":\r\n\r\n";
+    for (auto& l : before) out += l + "\r\n";
+    int after = 0; i = k;
+    while (i < log.size() && after < 60) { size_t e = log.find('\n', i); if (e == std::string::npos) e = log.size(); std::string l = log.substr(i, e - i); i = e + 1;
+        while (!l.empty() && l.back() == '\r') l.pop_back();
+        if (chatter_line(l)) continue; out += l + "\r\n"; after++; }
+    return out;
+}
+// The last run crashed (its log has the crash handler's block) and nobody has been told yet: one line, once. What was
+// told is remembered by the crash line and the log's size, so the same crash is not announced twice.
+static std::string g_crash_note, g_crash_sig;
+static std::string crash_seen_path() { return join(reports_dir(), "last-crash-seen.txt"); }
+static void crash_check() {
+    std::string p = join(P.exedir, P.exename + ".log"); if (!file_exists(p)) return;
+    std::string log = read_text(p); size_t k = log.find("*** Crash (signal"); if (k == std::string::npos) return;
+    size_t e = log.find('\n', k); std::string line = log.substr(k, e == std::string::npos ? std::string::npos : e - k);
+    g_crash_sig = fmt("%lld|", (long long)log.size()) + line;
+    if (read_text(crash_seen_path()) == g_crash_sig) { g_crash_sig.clear(); return; }
+    std::string in; size_t d = log.find("]   in ", k);
+    if (d != std::string::npos && d - k < 600) { size_t s = d + 7, sp = log.find_first_of(" \r\n", s); in = log.substr(s, sp == std::string::npos ? 40 : sp - s); }
+    g_crash_note = "The last run crashed" + (in.empty() ? std::string() : " (in " + in + ")") + ". About > REPORT packs what is needed to find it.";
+}
+static void crash_seen() { if (g_crash_sig.empty()) return; make_dirs(reports_dir()); write_text(crash_seen_path(), g_crash_sig); g_crash_sig.clear(); g_crash_note.clear(); }
+
 // Problem report: pack the logs, show the zip, and open the GitHub bug form with what we know filled in
 static std::string g_report_url;   // tests (SWR_FE_REPORT): the page that would open
 static void report_problem() {
@@ -379,6 +423,7 @@ static void report_problem() {
     std::string info = fmt("version %s\r\nrenderer %s\r\ngpu %s\r\ncpu %s\r\n%s\r\n", ver.c_str(), rn.c_str(), g_hw.gpu.c_str(), cpu.c_str(), hw_line().c_str());
     std::string zip, err;
     if (!make_report(info, &zip, &err)) { flash(err); return; }
+    crash_seen();
     if (!g_test) open_in_explorer(reports_dir());
     std::string url = "https://github.com/" MP4_REPO "/issues/new?template=bug_report.yml&version=" + url_enc(ver) +
                       "&gpu=" + url_enc(g_hw.gpu) + "&cpu=" + url_enc(cpu) + (g_hw.ram_gb ? "&ram=" + url_enc(fmt("%d GB", g_hw.ram_gb)) : std::string());
@@ -390,6 +435,7 @@ static void report_problem() {
 static float art_speed() { UpStage s = update_state().stage; return g_job.running || s == UP_DOWNLOADING || s == UP_CHECKING ? 3.2f : 1.0f; }
 
 static void page_play() {
+    { static bool told; if (!told) { told = true; crash_check(); if (!g_crash_note.empty() && !g_test) flash(g_crash_note); } }
     ImDrawList* dl = ImGui::GetWindowDrawList(); ImVec2 p = ImGui::GetCursorScreenPos();
     float t = (float)ImGui::GetTime(), fsz = ImGui::GetFontSize(); ImFont* font = ImGui::GetFont();
     GameCheck g = check_installed();
@@ -509,6 +555,7 @@ static void page_play() {
     help_text("Updates come from this project's GitHub releases page and only replace this game's own files.");
 #endif
     section("PROBLEMS");
+    if (!g_crash_note.empty()) help_text("The last run crashed. REPORT packs its log, the crash on its own (crash.txt) and your settings.");
     if (row_button("##report", "Report a problem: pack the logs and open the bug report page", "REPORT")) report_problem();
 #ifdef _WIN32
     help_text("The zip has this game's logs and settings, nothing else (no saves, no game files). Logs show your Windows user name in folder paths. Drag the zip into the report.");
