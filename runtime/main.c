@@ -415,7 +415,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"prebuild_shaders","1","1 = build every shader before the game draws with it: the shaders it ships in romfs/system/shd, and the ones\n;   it unpacks into GPU memory (Metroid Prime 4 at boot), compiled in the background and kept ready. 0 = at first use"},
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {"save_set","","Save in use: empty = your own game, or the name of a folder in <game>_data/save/sets (the launcher's\n;   \"Save in use\" choice): another save to play from, kept apart from your own"},
-  {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required).\n;   vulkan_native (the experimental native Vulkan renderer) is switched off in this version: it is read as vulkan"},
+  {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
 #ifdef SWR_HAVE_DLSS   /* the public release: no DLSS (GPL); build.bat dlss makes a personal build with it */
   {"dlss","0","1 = NVIDIA DLAA anti-aliasing (renderer=opengl or vulkan_native, RTX GPU, nvngx_dlss.dll in the game folder):\n;   DLSS at the internal resolution with the game's own motion vectors; the HUD is untouched. 0 = off"},
 #endif

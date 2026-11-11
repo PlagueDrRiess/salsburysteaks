@@ -857,11 +857,18 @@ static u32 g_volume_stores;
 static u32 g_volume_drawn;    /* storing draws that reached the command buffer */
 static u32 g_volume_draw[5];  /* the draw being set up: topology, first, count, instances, indexed */
 /* once per texture object: a draw samples a texture at a stored volume's address, or any 3D texture */
+/* SNX_VOLUME_DIAG=1 turns the read-backs and logs below on: they are for work on the renderer, and a read-back
+   waits for the GPU */
+static int volume_diag(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("SNX_VOLUME_DIAG") != NULL;
+    return on;
+}
 static void volume_sample_note(int stage, const Surf* t, VkImageView view, int indexed) {
     static const Surf* seen[96];
     static int nseen;
     int at_volume = 0;
-    if (!t) return;
+    if (!t || !volume_diag()) return;
     for (int i = 0; i < g_volume_n; i++) at_volume |= t->gva == g_volume_gva[i];
     if (!at_volume && t->type != VK_IMAGE_VIEW_TYPE_3D) return;
     for (int i = 0; i < nseen; i++)
@@ -1818,7 +1825,7 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
                       (unsigned)surf->f.vk);
             surf->gpu_volume = 1;
             if (!draw_stores_into(surf) && g_draw_nstored < 4) g_draw_stored[g_draw_nstored++] = surf;
-            {
+            if (volume_diag()) {
                 int known = 0;
                 for (int k = 0; k < g_volume_n; k++) known |= g_volume_gva[k] == surf->gva;
                 if (!known && g_volume_n < 4) g_volume_gva[g_volume_n++] = surf->gva;
@@ -2499,6 +2506,17 @@ retry:
     Surf* zt;
     u32 n;
     read_targets(ch, rt, &zt, &n);
+    /* a draw run only for what its vertex program stores into images: rasterization is off and nothing is captured
+       (Metroid Prime 4 fills its lighting volume this way, 4488 points a frame). It is drawn as asked: no targets, no
+       fragment program, its primitives discarded */
+    int stores_draw = vs->si.nimg && !r[0xDF] && !xfb_on;
+    if (stores_draw) {
+        n = 0;
+        zt = NULL;
+        fs = NULL;
+        LOG_LIMIT(1, "vulkan: a draw with rasterization off stores into images: drawn without targets or a fragment "
+                     "program\n");
+    }
     for (u32 i = 0; i < n; i++)
         if (trace_target(rt[i]))
             LOG_LIMIT(64,
@@ -2522,7 +2540,7 @@ retry:
                     break;
                 }
         }
-    if (!n && !zt && !xfb_on) { /* nothing drawn to and nothing captured */
+    if (!n && !zt && !xfb_on && !stores_draw) { /* nothing drawn to and nothing captured */
         g_vk_skipped++;
         return;
     }
@@ -2959,7 +2977,7 @@ retry:
         DYN(restart, prim_restart, rec_CmdSetPrimitiveRestartEnable(cb, prim_restart));
         /* RASTERIZE_ENABLE (0xDF) off discards the primitives once captured: only a capture draws without them here,
            as the register's reset value isn't known to be on (1 off, 2 on: 0 is a new command buffer's) */
-        u32 discard = (xfb_on && !r[0xDF]) || stores_only ? 2 : 1;
+        u32 discard = (xfb_on && !r[0xDF]) || stores_only || stores_draw ? 2 : 1;
         DYN(discard, discard, rec_CmdSetRasterizerDiscardEnable(cb, discard == 2));
     }
     {

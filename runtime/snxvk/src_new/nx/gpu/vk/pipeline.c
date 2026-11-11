@@ -280,7 +280,14 @@ void vk_pipeline_init(void) {
                 .binding = i,
                 .descriptorType = binding_type(i),
                 .descriptorCount = (i == SNX_VKB_TEXARRAY || i == SNX_VKB_TEXDEPTH) ? SNX_TEX_ARRAY : 1,
-                .stageFlags = image ? (s == 0 ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_FRAGMENT_BIT) : vis[s]};
+                /* storage images: compute and fragment programs, and vertex programs too (Metroid Prime 4 fills its
+                   lighting volume from one). Declared for compute alone, a vertex program's stores went nowhere: the
+                   world was black. Buffer images stay compute's */
+                .stageFlags = !image ? vis[s]
+                              : s != 0 ? VK_SHADER_STAGE_FRAGMENT_BIT
+                              : i < SNX_VKB_RS && g_vk.feat.vertexPipelineStoresAndAtomics
+                                    ? VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT
+                                    : VK_SHADER_STAGE_COMPUTE_BIT};
         }
         for (int arrays = 0; arrays < 2; arrays++) {
             u32 n = count;

@@ -577,13 +577,8 @@ static std::vector<Opt> build_options() {
     // Graphics
     F("resolution", "Graphics", "Graphics", "Internal resolution", LIVE_GL, "1", 0.25f, 4.0f, 0.05f,
       "The game's 3D resolution. Above your screen's size it is averaged down (smoother edges, no shimmer).");
-    // Native Vulkan is not offered for now (the world renders black with it); SWR_NATIVE_VULKAN=1 shows it for work on it
-    if (getenv("SWR_NATIVE_VULKAN"))
-        C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"}, {"vulkan", "Vulkan output"}, {"vulkan_native", "Native Vulkan (experimental)"}},
-          "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents. Native Vulkan: ScarletNX's Vulkan renderer draws everything.");
-    else
-        C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"}, {"vulkan", "Vulkan output"}},
-          "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents.");
+    C("renderer", "Graphics", "Graphics", "Renderer", LIVE_RESTART, "opengl", {{"opengl", "OpenGL"}, {"vulkan", "Vulkan output"}, {"vulkan_native", "Native Vulkan (experimental)"}},
+      "OpenGL is the most tested. Vulkan output: OpenGL draws, Vulkan presents. Native Vulkan: ScarletNX's Vulkan renderer draws everything.");
     C("upscaler", "Graphics", "Graphics", "Upscaling", LIVE_YES, "bilinear", {{"bilinear", "Bilinear"}, {"fsr", "AMD FSR 1"}},
       "How a picture rendered below your screen's size is enlarged. FSR 1 rebuilds edges and sharpens (set Internal resolution below 1, e.g. 0.67 or 0.75).");
     I("fsr_sharpness", "Graphics", "Graphics", "FSR sharpness", LIVE_YES, "80", 0, 100, 5, "FSR 1's sharpening pass (RCAS): 0 = none, 100 = strongest.");

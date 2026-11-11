@@ -1008,8 +1008,6 @@ static void fe_prepare() {
     if (g_test && getenv("SWR_FE_NO_OLD")) g_old.clear();   // tests: a PC with no earlier installation
     g_base = g_ini.get("setup_base", ""); g_update = g_ini.get("setup_update", "");
     // Portuguese of Portugal (9) is not offered: the game is given English then (svc_core.c game_lang), and the menu shows that
-    // Native Vulkan is not offered for now: a saved choice of it becomes Vulkan output (backend_win32.c does the same)
-    if (!getenv("SWR_NATIVE_VULKAN") && g_ini.get("renderer", "") == "vulkan_native") { set("renderer", "vulkan"); g_ini.save(); g_ini_dirty = false; }
     { std::string l = g_ini.get("language", ""); if (l == "9") { set("language", "1"); g_ini.save(); g_ini_dirty = false; } }
     bindings_from_string(g_ini.get("launcher_bindings", "1,0,6,7,10").c_str(), g_nav.bind); memcpy(g_old_bind, g_nav.bind, sizeof g_old_bind);
     g_nav.enabled = g_ini.get("launcher_nav", "1") != "0"; g_prompts = prompt_style_from(g_ini.get("launcher_prompts", "auto").c_str());

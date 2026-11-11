@@ -129,7 +129,8 @@ static int create_instance(void) {
     if (nbe > 15) WARN("vulkan: the window backend wants %u instance extensions, only 15 are taken\n", nbe);
     const char* layers[1];
     u32 nlayers = 0;
-    int validation = g_settings.vulkan_validation_layer;
+    /* SNX_VALIDATION=1: the Khronos validation layer, its messages in the log (work on the renderer) */
+    int validation = g_settings.vulkan_validation_layer || getenv("SNX_VALIDATION") != NULL;
     if (validation) {
         if (has_layer("VK_LAYER_KHRONOS_validation")) {
             layers[nlayers++] = "VK_LAYER_KHRONOS_validation";

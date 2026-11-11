@@ -43,9 +43,6 @@ void backend_ini(const char* k, const char* v){
   else if(!strcmp(k,"shot")) strncpy(g_shot,v,1023);
   else if(!strcmp(k,"script")) {strncpy(g_script,v,sizeof g_script-1);g_script[sizeof g_script-1]=0;}
   else if(!strcmp(k,"renderer")){ if(getenv("SWR_RENDERER")) v=getenv("SWR_RENDERER");   /* test boots: the renderer without editing the ini */
-    /* Native Vulkan is not offered for now (the world renders black with it): Vulkan output instead, which draws
-       the game right. SWR_NATIVE_VULKAN=1 keeps it for work on it */
-    if(!strcmp(v,"vulkan_native") && !getenv("SWR_NATIVE_VULKAN")){ LOG("renderer: Native Vulkan is switched off in this version: Vulkan output is used instead\n"); v="vulkan"; }
     g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
 }
 
