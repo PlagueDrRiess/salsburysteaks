@@ -6201,6 +6201,34 @@ static u32* to_spirv(const u8* code, const u64* insn, u32 max_bytes, int stage, 
                             if (source < 255) source++;
                         }
                     }
+                    /* test only (SNX_VOLUME_CONST): a vertex program's 3D stores write a fixed texel, to tell stores that
+                       don't land from stores of zeroes */
+                    if (dim == 5 && kind == 0 && getenv("SNX_VOLUME_CONST"))
+                        for (u32 q = 0; q < 4; q++)
+                            components[q] = spv_emit_constant_f32(&c->emit, c->f32_type, q == 3 ? 1.0f : 0.25f * (float)(q + 1));
+                    /* test only (SNX_VOLUME_DEBUG): each of a vertex program's 3D stores writes the coordinates it would
+                       have stored at, as floats, into slice <its order in the program> at a place taken from the vertex
+                       index (x = index & 63, y = index >> 6 & 31): the read-back then shows what the program computed */
+                    if (dim == 5 && kind == 0 && vertex_index && getenv("SNX_VOLUME_DEBUG")) {
+                        static u32 order;
+                        u32 vi = spv_emit_load(&c->emit, c->u32_type, vertex_index);
+                        u32 dx = spv_emit_bitwise_and_u32(&c->emit, c->u32_type, vi,
+                                                          spv_emit_constant_u32(&c->emit, c->u32_type, 63));
+                        u32 dy = spv_emit_bitwise_and_u32(
+                            &c->emit, c->u32_type,
+                            spv_emit_shift_right_u32(&c->emit, c->u32_type, vi,
+                                                     spv_emit_constant_u32(&c->emit, c->u32_type, 6)),
+                            spv_emit_constant_u32(&c->emit, c->u32_type, 31));
+                        coord = spv_emit_vec3_construct(
+                            &c->emit, vec3_i32, spv_emit_bitcast(&c->emit, i32_type, dx),
+                            spv_emit_bitcast(&c->emit, i32_type, dy),
+                            spv_emit_bitcast(&c->emit, i32_type,
+                                             spv_emit_constant_u32(&c->emit, c->u32_type, order++ % 9)));
+                        for (u32 q = 0; q < 3; q++)
+                            components[q] = spv_emit_convert_s_to_f(
+                                &c->emit, c->f32_type, spv_emit_bitcast(&c->emit, i32_type, reg_read(c, a + q)));
+                        components[3] = spv_emit_constant_f32(&c->emit, c->f32_type, 1.0f);
+                    }
                     u32 texel = spv_emit_vec4_construct(&c->emit, kind == 2 ? vec4_u32 : vec4, components);
                     spv_emit_image_write(&c->emit, c->image_type[slot], c->image[slot], coord, texel);
                 }

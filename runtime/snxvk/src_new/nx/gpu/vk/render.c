@@ -841,6 +841,120 @@ static void tex_resolve(GpuChannel* ch, u32 handle, TexRes* x) {
     }
 }
 
+/* the 3D textures the draw being set up stores into (stage_set, the vertex stage's set first) */
+static Surf* g_draw_stored[4];
+static int g_draw_nstored;
+static int draw_stores_into(const Surf* t) {
+    for (int i = 0; i < g_draw_nstored; i++)
+        if (g_draw_stored[i] == t) return 1;
+    return 0;
+}
+/* --- diagnostics for the 3D volume a vertex program stores into (the black world on this renderer) --- */
+static u64 g_volume_gva[4];   /* where such volumes are in guest memory */
+static int g_volume_n;
+static Surf* g_volume_probe;  /* one to read back at the next draw (volume_probe) */
+static u32 g_volume_stores;
+static u32 g_volume_drawn;    /* storing draws that reached the command buffer */
+static u32 g_volume_draw[5];  /* the draw being set up: topology, first, count, instances, indexed */
+/* once per texture object: a draw samples a texture at a stored volume's address, or any 3D texture */
+static void volume_sample_note(int stage, const Surf* t, VkImageView view, int indexed) {
+    static const Surf* seen[96];
+    static int nseen;
+    int at_volume = 0;
+    if (!t) return;
+    for (int i = 0; i < g_volume_n; i++) at_volume |= t->gva == g_volume_gva[i];
+    if (!at_volume && t->type != VK_IMAGE_VIEW_TYPE_3D) return;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i] == t) return;
+    if (nseen == 96) return;
+    seen[nseen++] = t;
+    LOG("vulkan: volume diag: stage %d%s samples texture %p at %llx: %ux%u, %u layers, depth %u, type %d, format %u, "
+        "stored to %d, at a stored volume's address %d, view %p\n",
+        stage, indexed ? " (indexed)" : "", (void*)t, (unsigned long long)t->gva, t->w, t->h, t->layers, t->depth3d,
+        (int)t->type, (unsigned)t->f.vk, t->gpu_volume, at_volume, (void*)view);
+}
+static float volume_half(u16 h) {
+    u32 e = (h >> 10) & 31, m = h & 1023;
+    float v = e == 0 ? (float)m / 1024.0f / 16384.0f : e == 31 ? 65504.0f : (1.0f + (float)m / 1024.0f) * (float)(1u << e) / 32768.0f;
+    return h & 0x8000 ? -v : v;
+}
+/* test only (SNX_VOLUME_FILL): the stored volume cleared to a known colour once, so the read-back below tells a
+   read-back that doesn't work, a volume something empties, and stores that never land apart */
+static Surf* g_volume_fill;
+static void volume_fill(void) {
+    Surf* t = g_volume_fill;
+    g_volume_fill = NULL;
+    if (!t) return;
+    vk_render_end();
+    VkCommandBuffer cb = vk_cmd();
+    VkClearColorValue z = {.float32 = {0.3f, 0.6f, 0.9f, 1.0f}};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    rec_CmdClearColorImage(cb, t->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &z, 1, &all);
+    LOG("vulkan: volume diag: the volume %p filled with 0.3 0.6 0.9 1.0 for the test\n", (void*)t);
+}
+/* the stored volume read back from the GPU: how many of its texels the stores reached, and what they hold */
+static void volume_probe(void) {
+    Surf* t = g_volume_probe;
+    VkBuffer buf;
+    VmaAllocation mem;
+    u64 off, size;
+    g_volume_probe = NULL;
+    if (!t || t->f.vk != VK_FORMAT_R16G16B16A16_SFLOAT) return;
+    size = (u64)t->w * t->h * t->depth3d * 8;
+    vk_render_end();
+    u8* p = vk_stage_back(size, &buf, &off, &mem);
+    if (!p) return;
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT);
+    VkBufferImageCopy c = {.bufferOffset = off,
+                           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                           .imageExtent = {t->w, t->h, t->depth3d}};
+    rec_CmdCopyImageToBuffer(cb, t->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
+    vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
+    vk_wait_submit(vk_last_submit());
+    vmaInvalidateAllocation(g_vk.vma, mem, off, size);
+    u64 texels = size / 8, nonzero = 0, alpha_nonzero = 0;
+    double sum[4] = {0};
+    float max[4] = {0};
+    const u16* q = (const u16*)p;
+    for (u64 i = 0; i < texels; i++) {
+        int any = 0;
+        for (int k = 0; k < 4; k++) {
+            float v = volume_half(q[i * 4 + k]);
+            sum[k] += v;
+            if (v > max[k]) max[k] = v;
+            any |= q[i * 4 + k] != 0;
+        }
+        nonzero += any;
+        alpha_nonzero += q[i * 4 + 3] != 0;
+    }
+    LOG("vulkan: volume diag: after %u stores set up, %u drawn, the %ux%ux%u volume %p has %llu of %llu texels not "
+        "zero (%llu with alpha); mean %.4f %.4f %.4f %.4f, max %.4f %.4f %.4f %.4f\n",
+        g_volume_stores, g_volume_drawn, t->w, t->h, t->depth3d, (void*)t, (unsigned long long)nonzero, (unsigned long long)texels,
+        (unsigned long long)alpha_nonzero, sum[0] / (double)texels, sum[1] / (double)texels, sum[2] / (double)texels,
+        sum[3] / (double)texels, max[0], max[1], max[2], max[3]);
+    if (getenv("SNX_VOLUME_DEBUG")) /* what spirv_translate.c's test stores wrote: see there */
+        for (u32 s = 0; s < 9; s++) {
+            const u16* m1 = q + ((u64)s * t->w * t->h + (u64)7 * t->w + 2) * 4;   /* vertex 450: expect 10 5 z */
+            const u16* m2 = q + ((u64)s * t->w * t->h + (u64)15 * t->w + 40) * 4; /* vertex 1000: expect 32 11 z */
+            LOG("vulkan: volume diag: store %u asked for (%.0f %.0f %.0f) at vertex 450 [%g] and (%.0f %.0f %.0f) at "
+                "vertex 1000 [%g]\n",
+                s, volume_half(m1[0]), volume_half(m1[1]), volume_half(m1[2]), volume_half(m1[3]), volume_half(m2[0]),
+                volume_half(m2[1]), volume_half(m2[2]), volume_half(m2[3]));
+        }
+    {
+        u32 zs[3] = {0, t->depth3d / 2, t->depth3d - 1};
+        for (int s = 0; s < 3; s++) {
+            const u16* m = q + ((u64)zs[s] * t->w * t->h + (u64)(t->h / 2) * t->w + t->w / 2) * 4;
+            LOG("vulkan: volume diag: centre texel of slice %u: %.4f %.4f %.4f %.4f\n", zs[s], volume_half(m[0]),
+                volume_half(m[1]), volume_half(m[2]), volume_half(m[3]));
+        }
+    }
+}
+
 int vk_tex_num(const u32* tic, const Surf* t) {
     VkFmt f;
     if (vk_tic_reads_stencil(tic)) return 1; /* a depth target's stencil is unsigned, whatever the surface holds */
@@ -1372,6 +1486,7 @@ static int tex_tables_set(GpuChannel* ch, int stage, const VkSh* s, const int* f
                     tex_resolve(ch, handle, &x);
                     if (x.t && (!kind->shadow || !x.t->f.is_int) && !is_target(x.t, rt, zt, n))
                         view = vk_tex_bind_view(x.t, want, x.tic, x.tsc, num);
+                    volume_sample_note(-1, x.t, view, 1);
                 }
                 funcs[id] = x.have && (x.tsc[0] >> 9 & 1) ? (x.tsc[0] >> 10) & 7 : 3;
                 int depth = kind->shadow && (!view || x.t->f.depth);
@@ -1637,19 +1752,24 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
                 LOG_LIMIT(1, "vulkan: a draw samples a target it renders to (read as empty)\n");
         } else
             view = vk_tex_bind_view(t, want, x->tic, x->tsc, num);
-        if (t && t->type == VK_IMAGE_VIEW_TYPE_3D)
-            LOG_LIMIT(8, "vulkan: stage %d samples the %ux%ux%u 3D texture %p at %llx (format %u, stored to %d, view %p)\n",
-                      stage, t->w, t->h, t->depth3d, (void*)t, (unsigned long long)t->gva, (unsigned)t->f.vk,
-                      t->gpu_volume, (void*)view);
+        volume_sample_note(stage, t, view, 0);
         const Surf* sampled = view ? t : NULL; /* the texture whose own view is bound, for the sampler */
         if (view && depth_ro) {
             *zt_ro = 1; /* render_begin moves it to the read-only layout */
             layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         } else if (view && slots)
             layout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT; /* render_begin moves it there */
-        else if (view)
+        else if (view) {
+            /* a texture this same draw stores into from an earlier stage (Metroid Prime 4's lighting volume: its
+               vertex program fills it, its fragment program samples it) stays in the layout the stores need. Moved to
+               the read-only one here, after the storing stage's set was made, the draw's stores went nowhere */
+            if (draw_stores_into(t)) {
+                layout = VK_IMAGE_LAYOUT_GENERAL;
+                LOG_LIMIT(2, "vulkan: a draw samples the 3D texture %p it also stores into: kept in the general layout\n",
+                          (void*)t);
+            }
             vk_surf_use(vk_cmd(), t, layout, VK_SAMPLED_STAGES, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
-        else {
+        } else {
             view = vk_null_view(want, st->shadow ? 3 : num);
             layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
@@ -1697,6 +1817,38 @@ static VkDescriptorSet stage_set(GpuChannel* ch, int stage, VkSh* s, Surf** rt, 
                       stage, surf->w, surf->h, surf->depth3d, (void*)surf, (unsigned long long)surf->gva,
                       (unsigned)surf->f.vk);
             surf->gpu_volume = 1;
+            if (!draw_stores_into(surf) && g_draw_nstored < 4) g_draw_stored[g_draw_nstored++] = surf;
+            {
+                int known = 0;
+                for (int k = 0; k < g_volume_n; k++) known |= g_volume_gva[k] == surf->gva;
+                if (!known && g_volume_n < 4) g_volume_gva[g_volume_n++] = surf->gva;
+                g_volume_stores++;
+                if (g_volume_stores == 120 || g_volume_stores == 600 || g_volume_stores % 900 == 0) g_volume_probe = surf;
+                if ((g_volume_stores == 60 || g_volume_stores == 119) && getenv("SNX_VOLUME_FILL")) g_volume_fill = surf;
+                if (g_volume_stores == 1 || g_volume_stores == 60 || g_volume_stores == 200)
+                    LOG("vulkan: volume diag: storing draw %u: render condition %u, program %p, image kind %d, "
+                        "capture %u, rasterize %u\n",
+                        g_volume_stores, ch->render_pred, (void*)s, s->si.img[i].kind, r[0x1D1], r[0xDF]);
+                if (g_volume_stores == 1 || g_volume_stores == 200)
+                    for (int cbi = 0; cbi < 18; cbi++) {
+                        if (!(s->si.cbuf_mask & (1u << cbi))) continue;
+                        u64 ca = ch->cbind[stage][cbi];
+                        u32 wds[12] = {0};
+                        u32 from = cbi == 2 ? 0x110 : 0x30;
+                        if (ca)
+                            for (int q = 0; q < 12; q++) wds[q] = gmem_r32(ca + from + (u64)q * 4);
+                        LOG("vulkan: volume diag: constant buffer %d of the storing program: at %llx, bound size %u, "
+                            "read up to %u; words from +%x: %08x %08x %08x %08x  %08x %08x %08x %08x  %08x %08x %08x "
+                            "%08x\n",
+                            cbi, (unsigned long long)ca, ch->cbind_size[stage][cbi], s->si.cbuf_max[cbi], from, wds[0],
+                            wds[1], wds[2], wds[3], wds[4], wds[5], wds[6], wds[7], wds[8], wds[9], wds[10], wds[11]);
+                    }
+                if (g_volume_stores == 1)
+                    LOG("vulkan: volume diag: the storing draw has %u render targets, depth target %d, topology %u, "
+                        "first %u, count %u, instances %u, indexed %u\n",
+                        n, zt != NULL, g_volume_draw[0], g_volume_draw[1], g_volume_draw[2], g_volume_draw[3],
+                        g_volume_draw[4]);
+            }
             vk_surf_use(vk_cmd(), surf, VK_IMAGE_LAYOUT_GENERAL, image_stage, VK_STORAGE_IMAGE_ACCESS);
             u32 volume_binding = SNX_VKB_IMG + (u32)i;
             d.ii[volume_binding] = (VkDescriptorImageInfo){VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
@@ -2261,6 +2413,11 @@ void vk_render_draw(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 co
     VkSh *vs, *tcs, *tes, *gs, *between[3];
     VkDescriptorSet bset[3];
     if (!count || !instances) return;
+    g_draw_nstored = 0;
+    g_volume_draw[0] = topology, g_volume_draw[1] = first, g_volume_draw[2] = count, g_volume_draw[3] = instances;
+    g_volume_draw[4] = (u32)indexed;
+    if (g_volume_fill) volume_fill();
+    if (g_volume_probe) volume_probe();
     vk_frame_check();
     if (g_draw.check < 0) {
         const char* e = getenv("SNX_DIRTY_CHECK");
@@ -2754,9 +2911,18 @@ retry:
         rec_CmdBindVertexBuffers2(cb, 0, k->nbind, vbuf, voff, NULL, g_vk.has_dynamic_stride ? pl->stride : NULL);
 
     VkViewport vp = vk_render_viewport(r);
+    /* no area: nothing is drawn (and Vulkan takes none). A draw whose programs store into images still has to run:
+       Metroid Prime 4 fills its lighting volume with a draw of points that has no viewport, only for what its
+       vertex program stores. It runs over one pixel with its primitives discarded */
+    int stores_only = 0;
     if (!(vp.width > 0) || !(vp.height != 0)) {
-        draw_images_discard(&images);
-        return; /* no area: nothing is drawn (and Vulkan takes none) */
+        if (!g_draw_nstored && !images.n) {
+            draw_images_discard(&images);
+            return;
+        }
+        LOG_LIMIT(1, "vulkan: a draw without a viewport stores into images: it runs with its primitives discarded\n");
+        vp = (VkViewport){0, 0, 1, 1, 0, 1};
+        stores_only = 1;
     }
     VkViewport vp_unjittered = vp; /* SwitchRecomp, DLSS: the scene draws move by the frame's jitter (dlss.c) */
     vk_dlss_jitter(zt, zt && r[0x4BA], zt && r[0x4B3] && cmp_op(r[0x4C3]) == VK_COMPARE_OP_EQUAL, &vp);
@@ -2793,7 +2959,7 @@ retry:
         DYN(restart, prim_restart, rec_CmdSetPrimitiveRestartEnable(cb, prim_restart));
         /* RASTERIZE_ENABLE (0xDF) off discards the primitives once captured: only a capture draws without them here,
            as the register's reset value isn't known to be on (1 off, 2 on: 0 is a new command buffer's) */
-        u32 discard = xfb_on && !r[0xDF] ? 2 : 1;
+        u32 discard = (xfb_on && !r[0xDF]) || stores_only ? 2 : 1;
         DYN(discard, discard, rec_CmdSetRasterizerDiscardEnable(cb, discard == 2));
     }
     {
@@ -2922,6 +3088,7 @@ retry:
                          base_instance);
     } else
         rec_CmdDraw(cb, count, instances, first, base_instance);
+    if (g_draw_nstored) g_volume_drawn++;
     pred_end(cb, ch->render_pred);
     if (dlss_xfb) vk_dlss_capture_end(cb);
     if (xcount) {

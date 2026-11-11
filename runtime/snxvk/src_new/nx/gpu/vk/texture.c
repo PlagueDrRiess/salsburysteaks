@@ -1182,6 +1182,10 @@ static void tex_take_drawn(Surf* t) {
         int scaled = s->sw != s->w || s->sh != s->h;
         if (scaled && (s->f.vk != t->f.vk || !can_blit(t->f.vk))) continue;
         u64 off = s->gva - t->gva;
+        if (t->gpu_volume)
+            LOG_LIMIT(6, "vulkan: volume diag: a render target %ux%u, %u layers, volume %d, format %u at +%llu is drawn "
+                         "over the stored volume %p\n",
+                      s->w, s->h, s->layers, s->volume, (unsigned)s->f.vk, (unsigned long long)off, (void*)t);
         if (t->type == VK_IMAGE_VIEW_TYPE_3D) {
             if (t->f.depth) continue;
             /* A layered color target can be sampled as a 3D texture at the same address. Its slices only exist in
