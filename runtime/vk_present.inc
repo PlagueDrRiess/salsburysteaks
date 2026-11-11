@@ -154,6 +154,12 @@ static void APIENTRY vkp_bind_framebuffer(GLenum target, GLuint fb){ g_real_bind
 static int vkp_fail(const char* what){ LOG("vulkan: %s - using OpenGL output\n",what); return 0; }
 
 static int vkp_load_gl(void){
+  /* AMD's OpenGL driver has every extension Vulkan output needs and then crashes in the first glSignalSemaphoreEXT, the
+     call that hands a frame to Vulkan (atio6axx.dll+714047, an access to 0x1001b: RX 9070 XT and RX 7800 XT, drivers
+     26.10.1 and 26.10.2, four reports). The game never got past its first frame. On AMD the picture goes out through
+     OpenGL instead, as it does where the driver lacks the extensions. SWR_VKP_AMD=1 tries Vulkan output anyway */
+  { const unsigned char* (APIENTRY *gstr)(GLenum)=backend_gl_proc_raw("glGetString"); const char* ven= gstr? (const char*)gstr(0x1F00 /* GL_VENDOR */) : NULL;
+    if(ven && (strstr(ven,"ATI") || strstr(ven,"AMD")) && !getenv("SWR_VKP_AMD")) return vkp_fail("AMD's OpenGL driver crashes when it hands a frame to Vulkan"); }
   #define G(f,n) *(void**)&gx.f=backend_gl_proc_raw(n); if(!gx.f) return vkp_fail("the OpenGL driver lacks " n);
   G(cmo,"glCreateMemoryObjectsEXT") G(mopi,"glMemoryObjectParameterivEXT") G(imw,"glImportMemoryWin32HandleEXT") G(tsm2,"glTexStorageMem2DEXT")
   G(gs,"glGenSemaphoresEXT") G(isw,"glImportSemaphoreWin32HandleEXT") G(sig,"glSignalSemaphoreEXT") G(wait,"glWaitSemaphoreEXT")
