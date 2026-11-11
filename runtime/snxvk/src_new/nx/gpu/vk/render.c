@@ -10,6 +10,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h> /* _mkdir: frame captures */
+#else
+#include <sys/stat.h>
+#endif
 #include "nx/runtime/options.h"
 #include "nx/gpu/gpu.h"
 #include "nx/gpu/renderer.h"
@@ -960,6 +965,178 @@ static void volume_probe(void) {
                 volume_half(m[1]), volume_half(m[2]), volume_half(m[3]));
         }
     }
+}
+
+/* ------------------------------------------------------------ frame capture (F8 and F5)
+   What the OpenGL renderer's F8 and F5 give, for this one: the next whole frame is written to captures/vk/NNN.
+   trace.txt has a line for every draw (programs, counts, blend words, targets, the textures the fragment program
+   reads). F8 (mode 1) adds a picture of each pass's color target when the draws move to another target; F5 (mode 2)
+   a picture after every draw. Pictures are 640x360 PPMs of the first color target, bright values clipped. Each
+   picture waits for the GPU, so the captured frame is slow: it is one frame. */
+extern volatile int g_vkcap_req; /* snxvk_glue.c: 1 from F8, 2 from F5 */
+#define CAP_W 640
+#define CAP_H 360
+static struct {
+    int mode, started;
+    u32 present, presents, draw, shot;
+    FILE* f;
+    char dir[96];
+    Surf *prev, *pending;
+} g_cap;
+static VkImage g_cap_img;
+static VmaAllocation g_cap_mem;
+static void cap_mkdir(const char* p) {
+#ifdef _WIN32
+    _mkdir(p);
+#else
+    mkdir(p, 0755);
+#endif
+}
+static void cap_snap(Surf* s, const char* kind) {
+    if (!s || s->f.depth || s->f.is_int || s->layout == VK_IMAGE_LAYOUT_UNDEFINED) return;
+    if (!g_cap_img) {
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                                .imageType = VK_IMAGE_TYPE_2D,
+                                .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                .extent = {CAP_W, CAP_H, 1},
+                                .mipLevels = 1,
+                                .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO};
+        if (!VK_OK(vmaCreateImage(g_vk.vma, &ii, &ai, &g_cap_img, &g_cap_mem, NULL))) {
+            g_cap_img = VK_NULL_HANDLE;
+            return;
+        }
+    }
+    VkBuffer buf;
+    VmaAllocation mem;
+    u64 off, size = (u64)CAP_W * CAP_H * 4;
+    vk_render_end();
+    u8* p = vk_stage_back(size, &buf, &off, &mem);
+    if (!p) return;
+    VkCommandBuffer cb = vk_cmd();
+    vk_surf_use(cb, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT,
+                VK_ACCESS_2_TRANSFER_READ_BIT);
+    vk_barrier(cb, g_cap_img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageBlit r = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                     .srcOffsets = {{0, 0, 0}, {(i32)s->sw, (i32)s->sh, 1}},
+                     .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                     .dstOffsets = {{0, 0, 0}, {CAP_W, CAP_H, 1}}};
+    rec_CmdBlitImage(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g_cap_img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                     &r, VK_FILTER_LINEAR);
+    vk_barrier(cb, g_cap_img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy c = {.bufferOffset = off,
+                           .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                           .imageExtent = {CAP_W, CAP_H, 1}};
+    rec_CmdCopyImageToBuffer(cb, g_cap_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
+    vk_submit(VK_NULL_HANDLE, 0, VK_NULL_HANDLE);
+    vk_wait_submit(vk_last_submit());
+    vmaInvalidateAllocation(g_vk.vma, mem, off, size);
+    char path[200];
+    snprintf(path, sizeof path, "%s/%s%04u_%llx_%ux%u.ppm", g_cap.dir, kind, g_cap.shot++, (unsigned long long)s->gva,
+             s->w, s->h);
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", CAP_W, CAP_H);
+    for (u32 y = CAP_H; y-- > 0;) /* the guest's rows run bottom to top: written the right way up */
+        for (u32 x = 0; x < CAP_W; x++) fwrite(p + ((u64)y * CAP_W + x) * 4, 1, 3, f);
+    fclose(f);
+    if (g_cap.f) fprintf(g_cap.f, "  picture %s\n", path);
+}
+static void cap_end(void) {
+    if (g_cap.prev) cap_snap(g_cap.prev, g_cap.mode == 2 ? "d" : "p");
+    if (g_cap.f) {
+        fprintf(g_cap.f, "end of the frame: %u draws, %u pictures\n", g_cap.draw, g_cap.shot);
+        fclose(g_cap.f);
+    }
+    LOG("vulkan: frame capture written to %s (%u draws, %u pictures)\n", g_cap.dir, g_cap.draw, g_cap.shot);
+    memset(&g_cap, 0, sizeof g_cap);
+}
+/* at the start of a draw: a capture asked for begins with the next frame's first draw and ends with that frame */
+static void cap_draw_begin(void) {
+    if (!g_cap.mode) {
+        int asked = g_vkcap_req;
+        if (!asked) return;
+        g_vkcap_req = 0;
+        g_cap.mode = asked;
+        g_cap.present = g_vk_present;
+        return;
+    }
+    if (!g_cap.started) {
+        if (g_vk_present == g_cap.present) return;
+        static u32 number;
+        cap_mkdir("captures");
+        cap_mkdir("captures/vk");
+        {
+            char path[160];
+            FILE* test;
+            for (;;) { /* a folder of its own: the first number without a trace in it */
+                snprintf(g_cap.dir, sizeof g_cap.dir, "captures/vk/%03u", ++number);
+                snprintf(path, sizeof path, "%s/trace.txt", g_cap.dir);
+                test = fopen(path, "r");
+                if (!test || number >= 999) break;
+                fclose(test);
+            }
+            cap_mkdir(g_cap.dir);
+            g_cap.f = fopen(path, "w");
+        }
+        g_cap.started = 1;
+        g_cap.present = g_vk_present;
+        if (g_cap.f)
+            fprintf(g_cap.f, "Native Vulkan frame capture, %s: a line per draw%s\n", g_cap.mode == 2 ? "F5" : "F8",
+                    g_cap.mode == 2 ? ", a picture after each" : ", a picture of each pass's target");
+        return;
+    }
+    /* a present doesn't fall between two frames' draws (it comes a dozen draws into the next frame's, and can come
+       twice for one frame): three of them hold at least one whole frame, start to end */
+    if (g_vk_present != g_cap.present) {
+        g_cap.present = g_vk_present;
+        if (g_cap.f) fprintf(g_cap.f, "-- present --\n");
+        if (++g_cap.presents >= 3 || g_cap.shot >= 2500) {
+            cap_end();
+            return;
+        }
+    }
+    if (g_cap.pending) {
+        cap_snap(g_cap.pending, g_cap.mode == 2 ? "d" : "p");
+        g_cap.pending = NULL;
+    }
+}
+/* a draw recorded in a captured frame: its line, and which target is pictured before the next draw */
+static void cap_draw_note(const u32* r, const VkSh* vs, const VkSh* fs, const TexRes* fres, Surf** rt, Surf* zt, u32 n,
+                          u32 topology, u32 count, u32 instances, int indexed) {
+    if (!g_cap.started || !g_cap.f) return;
+    Surf* rt0 = n ? rt[0] : NULL;
+    fprintf(g_cap.f, "draw %u: vs %016llx fs %016llx topology %u count %u instances %u indexed %d | blend %08x %08x %08x "
+                     "%08x %08x %08x %08x %08x (0x4D1..0x4D8) | %u targets",
+            g_cap.draw, (unsigned long long)vs->hash, fs ? (unsigned long long)fs->hash : 0ull, topology, count, instances,
+            indexed, r[0x4D1], r[0x4D2], r[0x4D3], r[0x4D4], r[0x4D5], r[0x4D6], r[0x4D7], r[0x4D8], n);
+    for (u32 i = 0; i < n; i++)
+        if (rt[i])
+            fprintf(g_cap.f, " [%u: %llx %ux%u format %u]", i, (unsigned long long)rt[i]->gva, rt[i]->w, rt[i]->h,
+                    (unsigned)rt[i]->f.vk);
+    if (zt) fprintf(g_cap.f, " depth %llx %ux%u", (unsigned long long)zt->gva, zt->w, zt->h);
+    if (fs) {
+        int nt = fs->si.ntex > SH_MAXTEX ? SH_MAXTEX : fs->si.ntex;
+        fprintf(g_cap.f, " | textures");
+        for (int i = 0; i < nt; i++)
+            if (fres[i].t)
+                fprintf(g_cap.f, " %d:%llx %ux%ux%u f%u%s", i, (unsigned long long)fres[i].t->gva, fres[i].t->w,
+                        fres[i].t->h, fres[i].t->depth3d, (unsigned)fres[i].t->f.vk, fres[i].t->is_rt ? " target" : "");
+            else
+                fprintf(g_cap.f, " %d:none", i);
+    }
+    fprintf(g_cap.f, "\n");
+    if (g_cap.mode == 2)
+        g_cap.pending = rt0;
+    else if (g_cap.prev && g_cap.prev != rt0)
+        g_cap.pending = g_cap.prev;
+    g_cap.prev = rt0;
+    g_cap.draw++;
 }
 
 int vk_tex_num(const u32* tic, const Surf* t) {
@@ -2425,6 +2602,7 @@ void vk_render_draw(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 co
     g_volume_draw[4] = (u32)indexed;
     if (g_volume_fill) volume_fill();
     if (g_volume_probe) volume_probe();
+    if (g_cap.mode || g_vkcap_req) cap_draw_begin();
     vk_frame_check();
     if (g_draw.check < 0) {
         const char* e = getenv("SNX_DIRTY_CHECK");
@@ -3134,6 +3312,7 @@ retry:
     } else
         rec_CmdDraw(cb, count, instances, first, base_instance);
     if (g_draw_nstored) g_volume_drawn++;
+    if (g_cap.started) cap_draw_note(r, vs, fs, fres, rt, zt, n, topology, count, instances, indexed);
     pred_end(cb, ch->render_pred);
     if (dlss_xfb) vk_dlss_capture_end(cb);
     if (xcount) {

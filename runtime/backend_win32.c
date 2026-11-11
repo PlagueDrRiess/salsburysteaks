@@ -303,8 +303,8 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
     if(w==VK_F2){ if(l & (1L<<30)) return 0; extern int g_opt_show_fps; g_opt_show_fps=!g_opt_show_fps; LOG("settings: F2 FPS counter %s\n",g_opt_show_fps? "on" : "off"); return 0; }
     if(w==VK_F7){ g_rec_toggle=1; return 0; }
     { extern int g_opt_ff; if(w==VK_TAB && g_opt_ff){ if(!(l & (1L<<30))){ extern volatile int g_ff_presses; g_ff_presses++; } return 0; } }   /* fast forward toggle (fast_forward=1); else Tab is the menu */
-    if(w==VK_F8){ extern volatile int g_shot8_req; g_shot8_req=1; return 0; }
-    if(w==VK_F5){ capture_hotkey(); return 0; }
+    if(w==VK_F8){ extern volatile int g_shot8_req, g_vkcap_req; g_shot8_req=1; g_vkcap_req=1; return 0; }   /* the second: Native Vulkan's capture */
+    if(w==VK_F5){ extern volatile int g_vkcap_req; capture_hotkey(); g_vkcap_req=2; return 0; }
     if(w==VK_F4){ if(l & (1L<<30)) return 0; g_opt_fps= g_opt_fps==0? 1 : 0; char t[64]; snprintf(t,sizeof t,"FPS limit: %s",g_opt_fps==0? "unlimited" : "60"); SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d\n",g_opt_fps); { extern void ini_set(const char*, const char*); char v[8]; snprintf(v,sizeof v,"%d",g_opt_fps); ini_set("fps_limit",v); } return 0; }
     keys_held|=keymap(w);if(test_tap_sample)keys_tapped|=keymap(w); return 0;
   case WM_SYSKEYUP: case WM_KEYUP: keys_held&=~keymap(w); return 0;
@@ -471,6 +471,13 @@ int backend_gl_create(void){
       /* -1: no compile threads, every shader program is made and used on the GL thread. 2026-11-09, two RX 9070 XT
          (driver 26.10.1) crashed in atio6axx.dll 2 s in, right after compile threads handed over loaded programs */
       if(g_opt_shader_threads<0) want=0;
+      /* AMD, shader_threads left on automatic: no compile threads. Five reports now (RX 9070 XT, 9060 XT, 7800 XT;
+         drivers 26.9.2 to 26.10.2) crash at atio6axx.dll+714047 a moment after the first programs made on the compile
+         threads' contexts are used on the main one, on OpenGL and Vulkan output alike. Making and using every program
+         on the one context is what shader_threads=-1 was for; on AMD it is now the default. shader_threads=2 (or
+         more) asks for the threads back */
+      { const unsigned char* (APIENTRY *gstr)(unsigned)=(void*)GetProcAddress(GetModuleHandleA("opengl32.dll"),"glGetString"); const char* ven= gstr? (const char*)gstr(0x1F00 /* GL_VENDOR */) : NULL;
+        if(ven && (strstr(ven,"ATI") || strstr(ven,"AMD")) && g_opt_shader_threads==0){ want=0; LOG("shaders: AMD OpenGL driver: no compile threads (shader_threads=2 or more to have them)\n"); } }
       for(g_nwctx=0;g_nwctx<want;g_nwctx++){ g_wctx[g_nwctx]=cca(g_hdc,g_ctx,ca); if(!g_wctx[g_nwctx]) break; }
       { extern int g_gl_workers; g_gl_workers= g_nwctx? g_nwctx : 1; } } }
   wglMakeCurrent(NULL,NULL); wglDeleteContext(tmp);
@@ -530,6 +537,8 @@ static void test_input_load(void){
 }
 static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   test_input_load();u32 frame=(u32)g_frames;
+  { static const char*vc; static int init; if(!init){ init=1; vc=getenv("SWR_TEST_VKCAP"); }   /* test only: "FRAME,FRAME,...:MODE" asks for a Native Vulkan frame capture at each of those guest frames (1 as F8, 2 as F5) */
+    if(vc&&*vc&&*vc!=':'){ char*end; u32 at=(u32)strtoul(vc,&end,10); if(frame>=at){ const char*m=strchr(vc,':'); extern volatile int g_vkcap_req; g_vkcap_req= m? atoi(m+1) : 1; vc= *end==','? end+1 : ""; } } }
   { static int done; const char*se; if(!done&&(se=getenv("SWR_TEST_SETENV"))&&*se){ u32 at=(u32)strtoul(se,NULL,10); const char*kv=strchr(se,':');   /* test only: "FRAME:NAME=VALUE" sets an env var at that guest frame */
       if(!kv){done=1;} else if(frame>=at){ char k[64]; const char*eq=strchr(kv+1,'='); if(eq&&eq-kv-1<64){ memcpy(k,kv+1,eq-kv-1); k[eq-kv-1]=0; SetEnvironmentVariableA(k,eq+1); { char pe[200]; snprintf(pe,sizeof pe,"%s=%s",k,eq+1); _putenv(pe); } LOG("test: frame %u set %s=%s\n",frame,k,eq+1); } done=1; } } }
   if(test_replay){while(test_i+1<test_n&&test_inputs[test_i+1].frame<=frame)test_i++;TestInput*v=&test_inputs[test_i];

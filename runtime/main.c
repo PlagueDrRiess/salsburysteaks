@@ -12,6 +12,7 @@ GuestFn* g_disp;
 GuestFn swr_interp_entry;
 char g_datadir[1024], g_exename[256], g_exedir[1024];
 char g_opt_save_set[64];   /* ini save_set: svc_fs.c */
+volatile int g_vkcap_req;  /* Native Vulkan frame capture asked for: 1 by F8, 2 by F5 (snxvk render.c takes it) */
 volatile int g_quit;
 int g_frames;
 int g_opt_video_async_retire=0,g_opt_video_avx2=1,g_opt_video_block_copy=1;   /* both checked byte for byte against the plain versions */
