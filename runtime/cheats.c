@@ -273,6 +273,7 @@ static void aspect_tick(void){
    of the community "Wider FOV" mod, which picked them by return address); shadow and light projections lie outside and
    keep theirs. Clamped so the whole angle stays under 170 degrees for the widest the game uses */
 static volatile int g_fov_code;   /* the game asked: the hook is in its code */
+volatile float g_fov_comp=1.0f;   /* the near layer's enlargement for the field of view setting (renderers read it) */
 float fov_code_scale(CPU* c, u64 lr){
   (void)c; g_fov_code=1;
   u64 o= lr-0x8006000ull;
@@ -288,9 +289,19 @@ float fov_code_scale(CPU* c, u64 lr){
     static u64 seen[64]; static int n; int known=0;
     for(int i=0;i<n;i++) known|= seen[i]==lr;
     if(!known && n<64){ seen[n++]=lr; float half=c->v[0].f[0]; LOG("fov: projection asked for from main+%llx (%s), field of view %.1f degrees\n",(unsigned long long)o,cam? "camera: the setting applies" : "left as it is",half*57.29578f); } }
-  if(g_opt_fov==100) return 1.0f;
+  { /* test only: SWR_FOV_TRACE=N logs the next N calls in full (where the matrix goes, the parameter block, the frame) */
+    static int left, used; if(!used){ const char* e=getenv("SWR_FOV_TRACE"); if(e && atoi(e)>0){ left=atoi(e); used=1; } }
+    extern int g_frames;
+    if(left>0){ left--; u64 fp=0, lr2=0; rd(c->x[29],8,&fp); if(fp) rd(fp+8,8,&lr2);   /* the caller's own caller */
+      LOG("fov trace: frame %d caller main+%llx fov %.2f to %llx params %llx (its caller main+%llx)\n",g_frames,(unsigned long long)o,deg,
+        (unsigned long long)c->x[19],(unsigned long long)c->x[20],(unsigned long long)(lr2-0x8006000ull)); } }
+  if(g_opt_fov==100){ g_fov_comp=1.0f; return 1.0f; }
   if(!cam) return 1.0f;
   float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f;
+  { /* what the renderers enlarge the arm cannon and visor layer by to undo the wider projection (gpu_gl.c): the ratio
+       of the two tangents of the half angle */
+    float h=c->v[0].f[0]*0.5f, hk=h*k; if(hk>1.48f) hk=1.48f;
+    if(h>0.01f) g_fov_comp=tanf(hk)/tanf(h); }
   return k; }
 int fov_available(void){ if(g_fov_code) return 1; lock(); ids(); if(!g_fov_loaded) fov_load(); int r=g_fov.have; unlock(); return r; }
 

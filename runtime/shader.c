@@ -446,6 +446,7 @@ static void exit_epilogue(Ctx* c){
     /* the sample mask sits at colors_end and depth at colors_end+1, with or without a sample mask */
     if(flags&2){ c->si->writes_depth=1; emitl(c,"gl_FragDepth = %s;",RF(c,reg+1)); }
   }
+  if(c->stage==ST_VS) emitl(c,"SWR_HUDFIX;");
   emitl(c,"return;");
 }
 
@@ -1426,7 +1427,7 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
     else if(g_vs_layer_ext==3) sb_put(D,"#extension GL_NV_viewport_array2 : require\n#define SWR_SET_LAYER(v) gl_Layer=(v)\n");
     else sb_put(D,"#define SWR_SET_LAYER(v)\n"); }
   if(stage==ST_FS && (si->sph[0]>>15&1)) {}
-  if((stage==ST_FS || stage==ST_VS) && si->uses_position_in) sb_f(D,"layout(std140, binding=%d) uniform SWR_RS { vec4 swr_rs; uvec4 swr_rm; };\n",g_rs_binding);   /* 1/res scale */
+  if((stage==ST_FS && si->uses_position_in) || stage==ST_VS) sb_f(D,"layout(std140, binding=%d) uniform SWR_RS { vec4 swr_rs; uvec4 swr_rm; vec4 swr_fv; };\n",g_rs_binding);   /* 1/res scale */
   /* texelFetch takes guest texel coordinates; render targets are stored at the resolution scale (swr_rs.z), so a
      fetch from one (bit set in swr_rm.x for the pixel stage, .y for the vertex stage, per texture slot) is scaled.
      Prime 4's fog reads the depth buffer this way, and its froxel writer (a vertex shader) the density buffer */
@@ -1449,6 +1450,10 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
     if(!g_glsl_es){ if(si->writes_layer) sb_put(D,"invariant gl_Position;\nout float gl_ClipDistance[8];\n");   /* Mesa drops gl_Layer when the block is redeclared */
       else sb_put(D,"out gl_PerVertex { invariant vec4 gl_Position; float gl_PointSize; float gl_ClipDistance[8]; };\n"); }
     else sb_put(D,"invariant gl_Position;\n");
+    /* the field of view setting: the visor and HUD are drawn with the world's projection, which the setting widens; for
+       their draws swr_fv.x enlarges every vertex with a perspective w back to the game's own size (gpu_gl.c hud_fov).
+       A macro, written out where main returns: a function using gl_Position failed to compile on NVIDIA */
+    sb_put(D,"#define SWR_HUDFIX if(swr_fv.x>1.0001 && abs(gl_Position.w-1.0)>0.0001) gl_Position.xy*=swr_fv.x\n");
   } else if(stage==ST_FS){
     const u8* imap=(const u8*)si->sph+0x18;
     for(int i=0;i<32;i++) if(c->in_used[i]){ si->in_mask|=1u<<i; u8 m=imap[i]; int f=(m&3)==1 || ((m>>2)&3)==1 || (flat>>i)&1; int lin=(m&3)==3;
@@ -1530,7 +1535,7 @@ char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si){
   if(c->uses_stk[1]) sb_put(D,"  uint pbk[16]; int pbk_sp=0;\n");
   if(c->uses_stk[2]) sb_put(D,"  uint pcnt[16]; int pcnt_sp=0;\n");
   if(stage==ST_FS){ u32 target=si->sph[18]; for(int rt=0;rt<8;rt++) if((target>>(rt*4))&15) sb_f(D,"  frag_color%d = %s(0);\n",rt,((si->rt_int_mask>>rt)&1)? (((si->rt_sint_mask>>rt)&1)? "ivec4" : "uvec4") : "vec4"); }
-  sb_put(D,c->out.p? c->out.p : ""); sb_put(D,"}\n");
+  sb_put(D,c->out.p? c->out.p : ""); if(c->stage==ST_VS) sb_put(D,"  SWR_HUDFIX;\n"); sb_put(D,"}\n");
   if(gs_pass) sb_put(D,"void main(){ swr_main(); swr_pass(); }\n");
   char* r=D->p; free(c->out.p); free(c->pop_tgt); free(c);
   return r;

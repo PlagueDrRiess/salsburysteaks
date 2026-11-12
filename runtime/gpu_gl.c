@@ -1215,7 +1215,7 @@ static void aw_write(const char* path, const void* d, size_t n, int append);
 
 /* common epilogue stuff: alpha test for FS, Y flip for VS */
 
-#define TR_VER 5191   /* bump when the GLSL output changes, invalidates caches */
+#define TR_VER 5192   /* bump when the GLSL output changes, invalidates caches */
 /* the file is named after the version: the loader stops at the first entry of another version, so a bump with a fixed
    name left every new entry unread behind the old ones (all shaders translated again each launch, the file growing) */
 #define TR_HEX_(v) 0x##v##u
@@ -1514,7 +1514,8 @@ static GLuint prog_finish(Sh* vs, Sh* fs, GLuint p){
   char path[160]; u64 key=prog_key(vs,fs); if(g_pcache) snprintf(path,sizeof path,"shader_cache/%s_%016llx.bin",g_pc_tag,(unsigned long long)key);
   GLint ok=0; glGetProgramiv(p,GL_LINK_STATUS,&ok);
   if(!ok){ Sh* ss[2]={vs,fs}; for(int k=0;k<2;k++){ GLint cok=1; glGetShaderiv(ss[k]->gl,GL_COMPILE_STATUS,&cok);
-      if(!cok){ char e[4096]; glGetShaderInfoLog(ss[k]->gl,sizeof e,NULL,e); WARN("shader %016llx (stage %d) failed to compile:\n%s\n",(unsigned long long)ss[k]->hash,ss[k]->stage,e); ss[k]->failed=1; } } }
+      if(!cok){ char e[4096]; glGetShaderInfoLog(ss[k]->gl,sizeof e,NULL,e); WARN("shader %016llx (stage %d) failed to compile:\n%s\n",(unsigned long long)ss[k]->hash,ss[k]->stage,e); ss[k]->failed=1;
+        if(ss[k]->src){ char fp[96]; plat_mkdir("captures"); snprintf(fp,sizeof fp,"captures/failed_%016llx.glsl",(unsigned long long)ss[k]->hash); FILE* ff=fopen(fp,"w"); if(ff){ fputs(ss[k]->src,ff); fclose(ff); } } } } }   /* its source, to read */
   if(!ok){ char log[2048]; glGetProgramInfoLog(p,2048,NULL,log); WARN("GL link: %s\n",log); glDeleteProgram(p);
     static int nd; if(nd<12 && vs->src && fs->src){ nd++; plat_mkdir("captures"); plat_mkdir("captures/failed"); char fp[200];
       snprintf(fp,sizeof fp,"captures/failed/%016llx_vs.glsl",(unsigned long long)vs->hash); FILE* f=fopen(fp,"w"); if(f){ fputs(vs->src,f); fclose(f); }
@@ -2251,6 +2252,7 @@ void gpu_gl_fps_overlay(void){
 /* the native Vulkan renderer's prompt overlay (snxvk hdr.c) asks for a picture here: there is none for this game */
 int skip_prompt_rgba(u8** px, int* w, int* h, int* tw){ (void)px; (void)w; (void)h; (void)tw; return 0; }
 
+static void hud_fov(float k);
 static void apply_state(GpuChannel* ch){
   u32* r=ch->r3d;
   { u32 sig[256]; int n=0;
@@ -2260,6 +2262,7 @@ static void apply_state(GpuChannel* ch){
     SR(0x55B,0x55B) SR(0x565,0x569) SR(0x56F,0x56F) SR(0x591,0x592) SR(0x646,0x648) SR(0x680,0x687) SR(0x780,0x7BF)
 #undef SR
     sig[n++]= g_zt? 1u : 0u; memcpy(&sig[n++],&g_scale,4); memcpy(&sig[n++],&g_dl_jx,4); memcpy(&sig[n++],&g_dl_jy,4);
+    { extern volatile float g_fov_comp; float fc=g_fov_comp; memcpy(&sig[n++],&fc,4); }
     if(g_state_ok && !memcmp(sig,g_state_sig,(size_t)n*4)){ st_state_skip++; return; }
     memcpy(g_state_sig,sig,(size_t)n*4); g_state_ok=1; }
   if(p_clip){ int m=r[0x35F]&1; if(m!=g_clip_mode){ p_clip(0x8CA1 /* LOWER_LEFT */, m? 0x935F /* ZERO_TO_ONE */ : 0x935E /* NEGATIVE_ONE_TO_ONE */); g_clip_mode=m; } }
@@ -2273,16 +2276,23 @@ static void apply_state(GpuChannel* ch){
   { GRP(0, r[0x280],r[0x281],r[0x282],r[0x283],r[0x284],r[0x285],r[0x35F],r[0x300],r[0x301],r[0x302],r[0x303],r[0x380],r[0x381],r[0x382],gsc,gjx,gjy){
     float x0=tx-fabsf_(sx), y0=ty-fabsf_(sy), w=2*fabsf_(sx), h=2*fabsf_(sy);
     if(w<1||h<1){ u32 vx=r[0x300], vy=r[0x301]; x0=(float)(vx&0xFFFF); w=(float)(vx>>16); y0=(float)(vy&0xFFFF); h=(float)(vy>>16); }
-    glViewportIndexedf(0,x0*g_scale+g_dl_jx,y0*g_scale+g_dl_jy,w*g_scale,h*g_scale);
-    g_dl_vp[0]=x0*g_scale; g_dl_vp[1]=y0*g_scale; g_dl_vp[2]=w*g_scale; g_dl_vp[3]=h*g_scale;
     float n, f; memcpy(&n,&r[0x302],4); memcpy(&f,&r[0x303],4);
     /* depth goes through the viewport transform (z*scale_z+translate_z) like on hw / yuzu's vk backend.
        SMO's fog pass draws at z=1 with NOTEQUAL to skip the sky, so this has to be exact */
     if((vt[2]!=0.0f || vt[5]!=0.0f) && !getenv("SWR_DEPTH_REGS")){ float red= (r[0x35F]&1)? 0.0f : 1.0f; n=vt[5]-vt[2]*red; f=vt[5]+vt[2];
       if(fabsf_(n)<1e-6f) n=0.0f; if(fabsf_(n-1.0f)<1e-6f) n=1.0f; if(fabsf_(f)<1e-6f) f=0.0f; if(fabsf_(f-1.0f)<1e-6f) f=1.0f; }
+    glViewportIndexedf(0,x0*g_scale+g_dl_jx,y0*g_scale+g_dl_jy,w*g_scale,h*g_scale);
+    g_dl_vp[0]=x0*g_scale; g_dl_vp[1]=y0*g_scale; g_dl_vp[2]=w*g_scale; g_dl_vp[3]=h*g_scale;
     glDepthRangeIndexed(0,n,f); g_dl_dr[0]=n; g_dl_dr[1]=f;
     if(r[0x380]&1){ u32 xs=r[0x381], ys=r[0x382]; glEnable(GL_SCISSOR_TEST); glScissorIndexed(0,(GLint)((xs&0xFFFF)*g_scale),(GLint)((ys&0xFFFF)*g_scale),(GLsizei)(((xs>>16)-(xs&0xFFFF))*g_scale+0.5f),(GLsizei)(((ys>>16)-(ys&0xFFFF))*g_scale+0.5f)); }
     else glDisable(GL_SCISSOR_TEST); } }
+  { /* field of view setting (cheats.c fov_code_scale): the visor frame and the HUD are drawn onto the finished picture
+       (full depth range, a target of the output size) with the world's projection, which the setting widens; they
+       shrank toward the centre. Their perspective vertices are enlarged back (shader.c swr_hudfix) */
+    extern volatile float g_fov_comp; float k=1.0f;
+    if(g_fov_comp>1.0001f && g_nrt>0 && g_rt[0] && ((g_rt[0]->w==1600 && g_rt[0]->h==900) || (g_rt[0]->w==1280 && g_rt[0]->h==720))
+       && g_dl_dr[0]<0.001f && g_dl_dr[1]>0.999f) k=g_fov_comp;
+    hud_fov(k); }
   /* raster state (winding flips with the Y flip) */
   { float w=2*fabsf_(sx), h=2*fabsf_(sy); int yflip= (w<1||h<1)? 0 : (sy<0);
     /* experiment (ini z_nudge, live): pull colour draws with a "less or equal" depth test toward the camera, in depth units. Tests whether speckles and the centre line are colour passes narrowly failing against their depth-only pass */
@@ -4670,9 +4680,11 @@ static u64 g_fr_t0, g_fr_max; static int g_fr_slow; static u64 g_fr_shnew;
 /* UBO with 1/scale for gl_FragCoord math (shaders do uv = pos * 1/native size) */
 static GLuint g_rs_ubo;
 
+static float g_hud_fov=1.0f;   /* swr_fv.x: the HUD's enlargement for the field of view setting (hud_fov) */
 static void rs_update(void){ extern int g_rs_binding;
-  if(!g_rs_ubo){ GLint mx=84; glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS,&mx); if(mx<2) return; g_rs_binding=mx-1; glGenBuffers(1,&g_rs_ubo); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferData(GL_UNIFORM_BUFFER,32,NULL,GL_DYNAMIC_DRAW); }
-  float v[8]={1.0f/g_scale,1.0f/g_scale,g_scale,(float)g_opt_dbg_view}; memcpy(&v[4],g_rs_mask,8); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,32,v); glBindBufferBase(GL_UNIFORM_BUFFER,(GLuint)g_rs_binding,g_rs_ubo); }
+  if(!g_rs_ubo){ GLint mx=84; glGetIntegerv(GL_MAX_UNIFORM_BUFFER_BINDINGS,&mx); if(mx<2) return; g_rs_binding=mx-1; glGenBuffers(1,&g_rs_ubo); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferData(GL_UNIFORM_BUFFER,48,NULL,GL_DYNAMIC_DRAW); }
+  float v[12]={1.0f/g_scale,1.0f/g_scale,g_scale,(float)g_opt_dbg_view,0,0,0,0,g_hud_fov,0,0,0}; memcpy(&v[4],g_rs_mask,8); glBindBuffer(GL_UNIFORM_BUFFER,g_rs_ubo); glBufferSubData(GL_UNIFORM_BUFFER,0,48,v); glBindBufferBase(GL_UNIFORM_BUFFER,(GLuint)g_rs_binding,g_rs_ubo); }
+static void hud_fov(float k){ if(k==g_hud_fov) return; g_hud_fov=k; rs_update(); }
 
 static void rt_rescale(float ns){
   float old=g_scale; if(ns==old) return;
