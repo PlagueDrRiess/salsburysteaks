@@ -232,7 +232,8 @@ static void rt_fpcr(CPU* c){ swr_fpcr_apply(c); }
 static void rt_sev(void){}
 
 static void rt_wfe(CPU* c){ (void)c; plat_yield(); }
-const RtAPI g_rtapi={swr_svc,rt_undef,rt_note_hint,rt_ticks,rt_brk,rt_fpcr,rt_sev,rt_wfe};
+extern float fov_code_scale(CPU* c, u64 lr);   /* cheats.c: the field of view hook in the game's own code */
+const RtAPI g_rtapi={swr_svc,rt_undef,rt_note_hint,rt_ticks,rt_brk,rt_fpcr,rt_sev,rt_wfe,fov_code_scale};
 
 /* ============================================================ system errors */
 void crash_report(void* host_pc, void* fault, int sig){
@@ -443,7 +444,7 @@ static const IniOpt INI_PERF[]={
   {"cheat_two_hit","0","1 = cheat: Two-hit kills, not bosses (a hook of the GBAtemp code for this game build)"},
   {"green_energy_10x","0","1 = Green Energy awards are worth 10 times as much (after the mod by melos444)"},
   {"aspect","16:9","Picture shape: 16:9 (the game's own), 21:9, 32:9, 16:10, any W:H, or auto = the window's shape.\n;   Wider shapes show more to the sides; the HUD and menus are stretched with the picture for now. Applies live"},
-  {"fov","100","Field of view in percent of the game's own (60-160, applies live). Needs a FOV hook for this game\n;   build (beyond/fov_hooks.txt)"},
+  {"fov","100","Field of view in percent of the game's own (60-160, applies live). Built into the game code for v1.1.0;\n;   other builds need a FOV hook (beyond/fov_hooks.txt)"},
   {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Other values are treated as 60: the game advances one step per image, so 30 meant half speed and 144 2.4 times the speed. F4 changes it in game"},
   {"video_async_retire","0","1 = retire obsolete video pictures on a bounded worker (experimental; restart required)"},
   {"video_avx2","1","1 = AVX2 video color conversion when the CPU has it (same result as the plain conversion, faster; restart required)"},

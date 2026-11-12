@@ -605,7 +605,7 @@ static std::vector<Opt> build_options() {
     B("forced_vsync", "Performance", "Gameplay", "VSync", LIVE_YES, "1", "Frames reach the screen in step with its refresh: no stutter from the two clocks drifting, no tearing.");
 #endif
     B("show_fps", "Graphics", "Gameplay", "FPS counter", LIVE_YES, "0", "Shows the frames per second that reach the screen, in the top-left corner.");
-    I("fov", "Gameplay", "Gameplay", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view. Needs a FOV hook for your game build (beyond/fov_hooks.txt).");
+    I("fov", "Gameplay", "Gameplay", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view: higher shows more of the world. Applies while playing.");
     B("cheats", "Gameplay", "Gameplay", "Cheat codes", LIVE_YES, "1", "Runs the cheats you turn on in the Cheats page (Atmosphere format files in the game's cheats folder).");
     B("green_energy_10x", "Gameplay", "Gameplay", "Green Energy 10x", LIVE_YES, "0", "Less crystal grinding: Green Energy awards are worth 10 times as much (1 / 3 / 6 become 10 / 30 / 60). Energy you already have is not changed, and what you collect stays if you turn this off. After the mod by melos444 on GameBanana.");
     B("cheat_missiles", "Gameplay", "Gameplay", "Missiles don't decrease", LIVE_YES, "0", "Firing missiles doesn't use any. Not while using the Legacy Suit's missile shield.");

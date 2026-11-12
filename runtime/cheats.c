@@ -242,7 +242,7 @@ static void fov_load(void){
     while(fgets(ln,sizeof ln,f)) if(ln[0]!='#' && ln[0]!=';' && fov_parse(ln,&g_fov)){ snprintf(g_fov_path,sizeof g_fov_path,"%s",files[k]); break; }
     fclose(f); }
   if(g_fov.have) LOG("fov: hook for build %s from %s\n",g_bid,g_fov_path);
-  else LOG("fov: no FOV hook for build %s yet (beyond/fov_hooks.txt): the FOV setting has no effect\n",g_bid); }
+  else LOG("fov: no FOV hook file for build %s (beyond/fov_hooks.txt): the game code's own hook is used if it has one\n",g_bid); }
 
 /* ------------------------------------------------------------------ aspect ratio (ultrawide)
    [Display] aspect: the game's own 16:9 constant (one float in main's read-only data, per build) is replaced with
@@ -267,7 +267,20 @@ static void aspect_tick(void){
   if(f!=want){ u32 o32; memcpy(&o32,&want,4); wr(g_main_base+off,4,o32); LOG("aspect: %g (was %g)\n",want,f); }
   g_aspect_now=want/(16.0f/9.0f); }
 
-int fov_available(void){ lock(); ids(); if(!g_fov_loaded) fov_load(); int r=g_fov.have; unlock(); return r; }
+/* The field of view hook in the game's code (metroid_perf.py, v1.1.0): the projection builder asks for a factor on its
+   half field of view, with its caller's return address. The camera's own callers lie in three ranges of main (those
+   of the community "Wider FOV" mod, which picked them by return address); shadow and light projections lie outside and
+   keep theirs. Clamped so the whole angle stays under 170 degrees for the widest the game uses */
+static volatile int g_fov_code;   /* the game asked: the hook is in its code */
+float fov_code_scale(CPU* c, u64 lr){
+  (void)c; g_fov_code=1;
+  if(g_opt_fov==100) return 1.0f;
+  u64 o= lr-0x8006000ull;
+  int cam= (o>=0x3324D4 && o<=0x339138) || (o>=0x58F4F8 && o<=0xB830D4) || (o>=0xD53E30 && o<=0x137F464);
+  if(!cam) return 1.0f;
+  float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f;
+  return k; }
+int fov_available(void){ if(g_fov_code) return 1; lock(); ids(); if(!g_fov_loaded) fov_load(); int r=g_fov.have; unlock(); return r; }
 
 static void fov_tick(void){
   if(!g_fov_loaded) fov_load();

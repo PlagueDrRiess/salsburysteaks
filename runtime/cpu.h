@@ -58,6 +58,7 @@ typedef struct RtAPI {
   void (*fpcr_changed)(struct CPU* c);
   void (*sev)(void);
   void (*wfe)(struct CPU* c);
+  float (*fov_scale)(struct CPU* c, u64 lr);   /* a projection's half field of view times this (metroid_perf.py) */
 } RtAPI;
 
 typedef struct CPU {
