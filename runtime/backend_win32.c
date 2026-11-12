@@ -328,7 +328,7 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
       if(down && (bit&mouse_aim_button())){ RECT c; GetClientRect(h,&c); MapWindowPoints(h,NULL,(POINT*)&c,2); ClipCursor(&c); }   /* aiming: the cursor stays in */
       else if(!down && (bit&mouse_aim_button())) ClipCursor(NULL);
       return (m==WM_XBUTTONDOWN||m==WM_XBUTTONUP)? TRUE : 0; }
-  case WM_SETCURSOR: if(LOWORD(l)==HTCLIENT && ov_is_open()){ extern HCURSOR cursor_game(void); SetCursor(cursor_game()); return TRUE; }
+  case WM_SETCURSOR: if(LOWORD(l)==HTCLIENT && ov_is_open()){ SetCursor(NULL); return TRUE; }   /* the F1 menu draws its own (ov.cpp), which shows in fullscreen too */
     { extern int g_opt_mouse_aim; if(g_opt_mouse_aim && LOWORD(l)==HTCLIENT){ SetCursor(NULL); return TRUE; } }   /* free aim: no cursor over the game */
     if(g_fullscreen && LOWORD(l)==HTCLIENT){ SetCursor(NULL); return TRUE; } break;
   }
@@ -599,8 +599,14 @@ static void mouse_apply(u64* b, i32* rx, i32* ry){
      movement is now owed instead of dropped: what a poll can't turn stays for the next ones, up to 0.3 s of full
      tilt, so the camera ends up where the mouse went and the sensitivity scales that distance */
   static float owed_x, owed_y;
-  owed_x+=(float)dx*s; owed_y+=-(float)dy*s;   /* in seconds of full tilt; screen y is down, the stick's up */
-  { float om=sqrtf(owed_x*owed_x+owed_y*owed_y); if(om>0.3f){ owed_x*=0.3f/om; owed_y*=0.3f/om; } }
+  { float mx=(float)dx*s, my=-(float)dy*s;   /* in seconds of full tilt; screen y is down, the stick's up */
+    /* stop means stop: a turn back drops what was owed the other way, and once the mouse rests only a couple of
+       frames' worth is left to turn (the 0.3 s carried on after a flick and overshot the target) */
+    if((mx>0 && owed_x<0) || (mx<0 && owed_x>0)) owed_x=0;
+    if((my>0 && owed_y<0) || (my<0 && owed_y>0)) owed_y=0;
+    owed_x+=mx; owed_y+=my;
+    float cap= dx||dy? 0.15f : 0.03f, om=sqrtf(owed_x*owed_x+owed_y*owed_y);
+    if(om>cap){ owed_x*=cap/om; owed_y*=cap/om; } }
   float tx=owed_x/dt, ty=owed_y/dt;
   { float tm=sqrtf(tx*tx+ty*ty); if(tm>1.0f){ tx/=tm; ty/=tm; } }
   owed_x-=tx*dt; owed_y-=ty*dt;

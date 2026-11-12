@@ -152,6 +152,35 @@ void tab_content(int t) {
     } }
 }
 
+// The menu's pointer, drawn over everything: the Windows cursor doesn't show in fullscreen or over a Vulkan picture.
+// A combat-visor reticle: a ring in four arcs turning slowly, four ticks and a centre dot, in the visor's cyan, which
+// closes in and turns orange like a lock-on over anything that can be clicked. It hides after a few seconds without
+// mouse movement, so a controller player sees only the highlight.
+static void draw_cursor(double t) {
+    ImGuiIO& io = ImGui::GetIO();
+    static ImVec2 last = {-1, -1}; static double moved = -100;
+    if (io.MousePos.x != last.x || io.MousePos.y != last.y) { last = io.MousePos; moved = t; }
+    if (!ImGui::IsMousePosValid(&io.MousePos) || t - moved > 4.0) return;
+    float fade = t - moved > 3.0 ? (float)(4.0 - (t - moved)) : 1.0f;
+    bool hot = ImGui::IsAnyItemHovered();
+    static float lock; lock += ((hot ? 1.0f : 0.0f) - lock) * std::min(1.0f, io.DeltaTime * 14.0f);
+    ImDrawList* d = ImGui::GetForegroundDrawList();
+    ImVec2 c = io.MousePos;
+    float r = S(15) - S(4) * lock, spin = (float)fmod(t * 1.1, 6.2831853) + lock * 0.785f;
+    int cr = (int)(64 + (255 - 64) * lock), cg = (int)(214 + (150 - 214) * lock), cb = (int)(255 + (40 - 255) * lock);
+    auto col = [&](float a) { return IM_COL32(cr, cg, cb, (int)(255 * a * fade)); };
+    d->AddCircleFilled(c, r + S(7), col(0.07f), 32);                      // glow
+    for (int i = 0; i < 4; i++) {                                         // the ring, in four arcs
+        float a0 = spin + i * 1.5707963f + 0.22f, a1 = a0 + 1.5707963f - 0.44f;
+        d->PathArcTo(c, r, a0, a1, 10); d->PathStroke(col(0.95f), 0, S(2.2f));
+    }
+    for (int i = 0; i < 4; i++) {                                         // ticks pointing in
+        float a = i * 1.5707963f + 0.785f, ca = cosf(a), sa = sinf(a);
+        d->AddLine({c.x + ca * (r + S(3)), c.y + sa * (r + S(3))}, {c.x + ca * (r + S(8)), c.y + sa * (r + S(8))}, col(0.85f), S(2));
+    }
+    d->AddCircleFilled(c, S(2.4f), col(1.0f), 12);                        // the point itself
+}
+
 void draw_menu(float W, float H, double t) {
     float k = (float)std::min(1.0, (t - g_t_open) / 0.16);   // open animation
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
@@ -357,6 +386,7 @@ extern "C" void ov_gl_frame(void) {
     if (act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) { g_tab = (g_tab + 1) % NTABS; g_tab_changed = true; }
     draw_menu((float)w, (float)h, ImGui::GetTime());
     if (!g_rev.active) nav_move(down ? 1 : up ? -1 : 0);   // controller up/down (keyboard arrows use ImGui's own nav)
+    draw_cursor(ImGui::GetTime());
     ImGui::Render();
     // draw into the window's framebuffer (with renderer=vulkan the runtime redirects framebuffer 0 to the image Vulkan presents)
     typedef void (APIENTRY * BindFB)(unsigned, unsigned); typedef void (APIENTRY * GetI)(unsigned, int*); typedef void (APIENTRY * Clip)(unsigned, unsigned);
