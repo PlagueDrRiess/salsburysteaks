@@ -16,6 +16,7 @@
    <game>_data/cheats/<BUILD ID>.fov, one line: BUILD_ID region+offset [ptr_offset ...] (a pointer chain to the camera's
    field of view, a float). Each update the game's own value is scaled by [Gameplay] fov (percent, 100 = the game's). */
 #include "rt.h"
+#include <math.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #define strncasecmp _strnicmp
@@ -274,9 +275,20 @@ static void aspect_tick(void){
 static volatile int g_fov_code;   /* the game asked: the hook is in its code */
 float fov_code_scale(CPU* c, u64 lr){
   (void)c; g_fov_code=1;
-  if(g_opt_fov==100) return 1.0f;
   u64 o= lr-0x8006000ull;
-  int cam= (o>=0x3324D4 && o<=0x339138) || (o>=0x58F4F8 && o<=0xB830D4) || (o>=0xD53E30 && o<=0x137F464);
+  /* every perspective projection but the 90-degree ones (reflection probe faces, which must meet at the edges). The
+     community mod's three caller ranges missed the first-person camera itself (main+131FA0 and +133694, 55 degrees) */
+  float deg=c->v[0].f[0]*57.29578f;
+  int cam= deg>10.0f && deg<150.0f && fabsf(deg-90.0f)>0.5f;
+  { /* test only: SWR_FOV_ONLY=hex,hex... widens only the callers at those offsets of main */
+    static int init; static u64 only[16]; static int nonly;
+    if(!init){ init=1; const char* e=getenv("SWR_FOV_ONLY"); while(e && *e && nonly<16){ char* end; only[nonly++]=strtoull(e,&end,16); e= *end==','? end+1 : NULL; } }
+    if(nonly){ cam=0; for(int i=0;i<nonly;i++) cam|= only[i]==o; } }
+  { /* each caller once in the log: which projections there are, and which the setting widens */
+    static u64 seen[64]; static int n; int known=0;
+    for(int i=0;i<n;i++) known|= seen[i]==lr;
+    if(!known && n<64){ seen[n++]=lr; float half=c->v[0].f[0]; LOG("fov: projection asked for from main+%llx (%s), field of view %.1f degrees\n",(unsigned long long)o,cam? "camera: the setting applies" : "left as it is",half*57.29578f); } }
+  if(g_opt_fov==100) return 1.0f;
   if(!cam) return 1.0f;
   float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f;
   return k; }
