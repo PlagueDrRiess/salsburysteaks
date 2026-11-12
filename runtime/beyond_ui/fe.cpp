@@ -627,7 +627,7 @@ static void page_controls() {
         std::string f = pick_file(g_hwnd, "Choose SDL2.dll", L"SDL2", L"SDL2.dll");
         if (!f.empty()) { if (CopyFileW(wide(f).c_str(), wide(join(P.exedir, "SDL2.dll")).c_str(), FALSE)) flash("SDL2.dll installed: restart the launcher to use it"); else flash("Copy failed"); }
     }
-    section("MOUSE"); draw_opt("mouse_aim"); if (getb("mouse_aim")) draw_opt("mouse_sensitivity");
+    section("MOUSE"); draw_opt("mouse_aim"); if (getb("mouse_aim")) { draw_opt("mouse_mode"); draw_opt("mouse_sensitivity"); }
 #else   // controllers come from the system's SDL2 (backend_x11.c); the game mouse is Windows-only
     page_title("CONTROLS", "Pair Bluetooth controllers in your desktop's settings first. With SDL2 the game supports Switch Pro, Joy-Con, DualShock 4, "
                "DualSense, 8BitDo, Xbox and Steam Deck controls over USB or Bluetooth.");

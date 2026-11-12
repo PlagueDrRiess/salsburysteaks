@@ -538,7 +538,8 @@ static void test_input_load(void){
 static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   test_input_load();u32 frame=(u32)g_frames;
   { static const char*vc; static int init; if(!init){ init=1; vc=getenv("SWR_TEST_VKCAP"); }   /* test only: "FRAME,FRAME,...:MODE" asks for a Native Vulkan frame capture at each of those guest frames (1 as F8, 2 as F5) */
-    if(vc&&*vc&&*vc!=':'){ char*end; u32 at=(u32)strtoul(vc,&end,10); if(frame>=at){ const char*m=strchr(vc,':'); extern volatile int g_vkcap_req; g_vkcap_req= m? atoi(m+1) : 1; vc= *end==','? end+1 : ""; } } }
+    if(vc&&*vc&&*vc!=':'){ char*end; u32 at=(u32)strtoul(vc,&end,10); if(frame>=at){ const char*m=strchr(vc,':'); extern volatile int g_vkcap_req, g_shot8_req; g_vkcap_req= m? atoi(m+1) : 1; g_shot8_req=1;   /* and the OpenGL renderer's F8 */
+        LOG("test: frame capture asked for at guest frame %u\n",frame); vc= *end==','? end+1 : ""; } } }
   { static int done; const char*se; if(!done&&(se=getenv("SWR_TEST_SETENV"))&&*se){ u32 at=(u32)strtoul(se,NULL,10); const char*kv=strchr(se,':');   /* test only: "FRAME:NAME=VALUE" sets an env var at that guest frame */
       if(!kv){done=1;} else if(frame>=at){ char k[64]; const char*eq=strchr(kv+1,'='); if(eq&&eq-kv-1<64){ memcpy(k,kv+1,eq-kv-1); k[eq-kv-1]=0; SetEnvironmentVariableA(k,eq+1); { char pe[200]; snprintf(pe,sizeof pe,"%s=%s",k,eq+1); _putenv(pe); } LOG("test: frame %u set %s=%s\n",frame,k,eq+1); } done=1; } } }
   if(test_replay){while(test_i+1<test_n&&test_inputs[test_i+1].frame<=frame)test_i++;TestInput*v=&test_inputs[test_i];
@@ -593,7 +594,16 @@ static void mouse_apply(u64* b, i32* rx, i32* ry){
     if(g_opt_mouse_mode==1){ float k=(float)g_opt_mouse_sens/100.0f/8000.0f/dt; static int said; if(!said){ said=1; LOG("input: mouse drives the motion sensor (Pointer mode)\n"); }
       g_motion_gyro[0]=-(float)dy*k; g_motion_gyro[1]=0; g_motion_gyro[2]=-(float)dx*k; if(g_motion_acc[2]==0) g_motion_acc[2]=-1.0f; g_motion_ns=now; vx=vy=0; return; } }
   float s=(float)g_opt_mouse_sens/100.0f/3000.0f;
-  float tx=(float)dx/dt*s, ty=-(float)dy/dt*s;   /* screen y is down, the stick's up */
+  /* The stick can't turn the camera faster than the game's own full-tilt speed, so a fast flick used to lose
+     everything above it and a higher sensitivity changed nothing (issue 10: "slow no matter what it is set to"). The
+     movement is now owed instead of dropped: what a poll can't turn stays for the next ones, up to 0.3 s of full
+     tilt, so the camera ends up where the mouse went and the sensitivity scales that distance */
+  static float owed_x, owed_y;
+  owed_x+=(float)dx*s; owed_y+=-(float)dy*s;   /* in seconds of full tilt; screen y is down, the stick's up */
+  { float om=sqrtf(owed_x*owed_x+owed_y*owed_y); if(om>0.3f){ owed_x*=0.3f/om; owed_y*=0.3f/om; } }
+  float tx=owed_x/dt, ty=owed_y/dt;
+  { float tm=sqrtf(tx*tx+ty*ty); if(tm>1.0f){ tx/=tm; ty/=tm; } }
+  owed_x-=tx*dt; owed_y-=ty*dt;
   float a=dt/(dt+0.012f); vx+=(tx-vx)*a; vy+=(ty-vy)*a;
   float m=sqrtf(vx*vx+vy*vy);
   if(m<0.01f){ vx=vy=0; return; }   /* stopped: a controller's stick (or none) goes through */

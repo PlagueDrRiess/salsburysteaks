@@ -137,7 +137,7 @@ void tab_content(int t) {
         help_text("Cheats that change game data work; cheats that patch game code (ARM instructions) do nothing, the code is recompiled.");
         break; }
     case 4: section("OUTPUT"); opt_row("volume"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
-    case 5: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_sensitivity");
+    case 5: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_mode"); opt_row("mouse_sensitivity");
             section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
             help_text("Button mapping and menu buttons are on the Play screen's Controls page."); break;
     default: {
