@@ -116,11 +116,11 @@ void opt_row(const char* key) {
 void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
-            opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language"); break;
+            opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language");
+            section("FIELD OF VIEW"); opt_row("fov"); if (!fov_available()) help_text("No FOV hook for this game build yet: the slider has no effect until one is added to beyond/fov_hooks.txt."); break;
     case 1: section("UPSCALING"); opt_row("resolution"); opt_row("upscaler"); if (val("upscaler") == "fsr") opt_row("fsr_sharpness");
             section("QUALITY"); opt_row("antialiasing"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
     case 2: section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps");
-            section("CAMERA"); opt_row("fov"); if (!fov_available()) help_text("No FOV hook for this game build yet: the slider has no effect until one is added to beyond/fov_hooks.txt.");
             section("RIDES"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
     case 3: {
         section("CHEATS"); opt_row("cheats"); opt_row("green_energy_10x");
@@ -150,35 +150,6 @@ void tab_content(int t) {
         for (auto& r : kb) row_text(r[0], r[1]);
         section("ABOUT"); help_text("Metroid Prime 4 Recomp: Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; Dear ImGui; SDL2. Full credits on the Play screen.");
     } }
-}
-
-// The menu's pointer, drawn over everything: the Windows cursor doesn't show in fullscreen or over a Vulkan picture.
-// A combat-visor reticle: a ring in four arcs turning slowly, four ticks and a centre dot, in the visor's cyan, which
-// closes in and turns orange like a lock-on over anything that can be clicked. It hides after a few seconds without
-// mouse movement, so a controller player sees only the highlight.
-static void draw_cursor(double t) {
-    ImGuiIO& io = ImGui::GetIO();
-    static ImVec2 last = {-1, -1}; static double moved = -100;
-    if (io.MousePos.x != last.x || io.MousePos.y != last.y) { last = io.MousePos; moved = t; }
-    if (!ImGui::IsMousePosValid(&io.MousePos) || t - moved > 4.0) return;
-    float fade = t - moved > 3.0 ? (float)(4.0 - (t - moved)) : 1.0f;
-    bool hot = ImGui::IsAnyItemHovered();
-    static float lock; lock += ((hot ? 1.0f : 0.0f) - lock) * std::min(1.0f, io.DeltaTime * 14.0f);
-    ImDrawList* d = ImGui::GetForegroundDrawList();
-    ImVec2 c = io.MousePos;
-    float r = S(15) - S(4) * lock, spin = (float)fmod(t * 1.1, 6.2831853) + lock * 0.785f;
-    int cr = (int)(64 + (255 - 64) * lock), cg = (int)(214 + (150 - 214) * lock), cb = (int)(255 + (40 - 255) * lock);
-    auto col = [&](float a) { return IM_COL32(cr, cg, cb, (int)(255 * a * fade)); };
-    d->AddCircleFilled(c, r + S(7), col(0.07f), 32);                      // glow
-    for (int i = 0; i < 4; i++) {                                         // the ring, in four arcs
-        float a0 = spin + i * 1.5707963f + 0.22f, a1 = a0 + 1.5707963f - 0.44f;
-        d->PathArcTo(c, r, a0, a1, 10); d->PathStroke(col(0.95f), 0, S(2.2f));
-    }
-    for (int i = 0; i < 4; i++) {                                         // ticks pointing in
-        float a = i * 1.5707963f + 0.785f, ca = cosf(a), sa = sinf(a);
-        d->AddLine({c.x + ca * (r + S(3)), c.y + sa * (r + S(3))}, {c.x + ca * (r + S(8)), c.y + sa * (r + S(8))}, col(0.85f), S(2));
-    }
-    d->AddCircleFilled(c, S(2.4f), col(1.0f), 12);                        // the point itself
 }
 
 void draw_menu(float W, float H, double t) {
@@ -211,7 +182,7 @@ void draw_menu(float W, float H, double t) {
     ImGui::EndChild();
     // footer: resume / quit and prompts
     ImVec2 f = ImGui::GetCursorScreenPos();
-    if (big_button("##resume", "RESUME", {S(220), S(48)})) { Lock l; g_q.open = false; }
+    if (big_button("##resume", "RESUME", {S(220), S(48)})) { Lock l; g_q.open = false; logf_(1, "menu: closed by RESUME at frame %d\n", g_frames); }
     ImGui::SameLine(0, S(14));
     if (big_button("##quit", g_quit_confirm ? "QUIT: SURE?" : "QUIT GAME", {S(220), S(48)}, false)) { if (g_quit_confirm) backend_request_quit(); g_quit_confirm = true; }
     if (g_q.pad_used) {
@@ -298,7 +269,7 @@ extern "C" int ov_pad(unsigned long long phys, int lx, int ly) {
     g_prev_phys = phys;
     if (toggle && g_snxvk_on) { if (g_backend_status) g_backend_status("The in-game menu needs the OpenGL renderer for now (Play screen > Graphics)"); toggle = false; }
     bool open;
-    { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else g_q.open = false; } open = g_q.open; }
+    { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else { g_q.open = false; logf_(1, "menu: closed by %s at frame %d\n", (pressed >> 30 & 1) ? "the Home button" : "F1 or the menu shortcut", g_frames); } } open = g_q.open; }
     if (open) {
         g_latch = true; g_open_seen = true;
         { Lock k; memcpy(g_nav.bind, g_q.bind, sizeof g_nav.bind); g_nav.enabled = g_q.nav_on; }
@@ -381,12 +352,12 @@ extern "C" void ov_gl_frame(void) {
     g_row.pad_left = left || ImGui::IsKeyPressed(ImGuiKey_LeftArrow); g_row.pad_right = right || ImGui::IsKeyPressed(ImGuiKey_RightArrow); g_row.confirm = act[NAV_CONFIRM];
     if (g_rev.active && act[NAV_CONFIRM]) { g_rev.active = false; g_row.confirm = false; }   // "Keep these display settings?": confirm keeps
     bool close = act[NAV_BACK] || ImGui::IsKeyPressed(ImGuiKey_Escape);
-    if (close) { if (g_rev.active) revert_display(); else { Lock k; g_q.open = false; } }
+    if (close) { if (g_rev.active) revert_display(); else { Lock k; g_q.open = false; } logf_(1, "menu: closed by %s at frame %d\n", act[NAV_BACK] ? "the controller's back button" : "Escape", g_frames); }
     if (act[NAV_PREV] || ImGui::IsKeyPressed(ImGuiKey_PageUp)) { g_tab = (g_tab + NTABS - 1) % NTABS; g_tab_changed = true; }
     if (act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) { g_tab = (g_tab + 1) % NTABS; g_tab_changed = true; }
     draw_menu((float)w, (float)h, ImGui::GetTime());
     if (!g_rev.active) nav_move(down ? 1 : up ? -1 : 0);   // controller up/down (keyboard arrows use ImGui's own nav)
-    draw_cursor(ImGui::GetTime());
+    visor_cursor(ImGui::GetTime());
     ImGui::Render();
     // draw into the window's framebuffer (with renderer=vulkan the runtime redirects framebuffer 0 to the image Vulkan presents)
     typedef void (APIENTRY * BindFB)(unsigned, unsigned); typedef void (APIENTRY * GetI)(unsigned, int*); typedef void (APIENTRY * Clip)(unsigned, unsigned);

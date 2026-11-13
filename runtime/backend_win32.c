@@ -539,7 +539,10 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   test_input_load();u32 frame=(u32)g_frames;
   { static const char*vc; static int init; if(!init){ init=1; vc=getenv("SWR_TEST_VKCAP"); }   /* test only: "FRAME,FRAME,...:MODE" asks for a Native Vulkan frame capture at each of those guest frames (1 as F8, 2 as F5) */
     if(vc&&*vc&&*vc!=':'){ char*end; u32 at=(u32)strtoul(vc,&end,10); if(frame>=at){ const char*m=strchr(vc,':'); extern volatile int g_vkcap_req, g_shot8_req; g_vkcap_req= m? atoi(m+1) : 1; g_shot8_req=1;   /* and the OpenGL renderer's F8 */
+        if(g_vkcap_req==2){ extern void gpu_gl_dump_rts(void); gpu_gl_dump_rts(); }   /* and its F5 trace of the next frame */
         LOG("test: frame capture asked for at guest frame %u\n",frame); vc= *end==','? end+1 : ""; } } }
+  { static const char* e; static int init; if(!init){ init=1; e=getenv("SWR_TEST_MENU_FRAME"); }   /* test only: "FRAME,FRAME,..." presses F1 at each */
+    if(e&&*e){ char* end; u32 at=(u32)strtoul(e,&end,10); if(frame>=at){ extern void ov_input_toggle(void); ov_input_toggle(); LOG("test: F1 at guest frame %u\n",frame); e= *end==','? end+1 : ""; } } }
   { static int done; const char*se; if(!done&&(se=getenv("SWR_TEST_SETENV"))&&*se){ u32 at=(u32)strtoul(se,NULL,10); const char*kv=strchr(se,':');   /* test only: "FRAME:NAME=VALUE" sets an env var at that guest frame */
       if(!kv){done=1;} else if(frame>=at){ char k[64]; const char*eq=strchr(kv+1,'='); if(eq&&eq-kv-1<64){ memcpy(k,kv+1,eq-kv-1); k[eq-kv-1]=0; SetEnvironmentVariableA(k,eq+1); { char pe[200]; snprintf(pe,sizeof pe,"%s=%s",k,eq+1); _putenv(pe); } LOG("test: frame %u set %s=%s\n",frame,k,eq+1); } done=1; } } }
   if(test_replay){while(test_i+1<test_n&&test_inputs[test_i+1].frame<=frame)test_i++;TestInput*v=&test_inputs[test_i];

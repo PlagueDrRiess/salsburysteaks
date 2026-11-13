@@ -25,6 +25,35 @@ Fonts g_fonts; float g_scale = 1.0f; RowCtx g_row; bool g_focus_first;
 
 float S(float px) { return px * g_scale; }
 
+// The menus' pointer, drawn over everything: the Windows cursor doesn't show in fullscreen or over a Vulkan picture,
+// and the launcher uses the same one. A combat-visor reticle: a ring in four arcs turning slowly, four ticks and a
+// centre dot, in the visor's cyan, which closes in and turns orange like a lock-on over anything that can be clicked.
+// It hides after a few seconds without mouse movement, so a controller player sees only the highlight.
+void visor_cursor(double t) {
+    ImGuiIO& io = ImGui::GetIO();
+    static ImVec2 last = {-1, -1}; static double moved = -100;
+    if (io.MousePos.x != last.x || io.MousePos.y != last.y) { last = io.MousePos; moved = t; }
+    if (!ImGui::IsMousePosValid(&io.MousePos) || t - moved > 4.0) return;
+    float fade = t - moved > 3.0 ? (float)(4.0 - (t - moved)) : 1.0f;
+    bool hot = ImGui::IsAnyItemHovered();
+    static float lock; lock += ((hot ? 1.0f : 0.0f) - lock) * std::min(1.0f, io.DeltaTime * 14.0f);
+    ImDrawList* d = ImGui::GetForegroundDrawList();
+    ImVec2 c = io.MousePos;
+    float r = S(15) - S(4) * lock, spin = (float)fmod(t * 1.1, 6.2831853) + lock * 0.785f;
+    int cr = (int)(64 + (255 - 64) * lock), cg = (int)(214 + (150 - 214) * lock), cb = (int)(255 + (40 - 255) * lock);
+    auto col = [&](float a) { return IM_COL32(cr, cg, cb, (int)(255 * a * fade)); };
+    d->AddCircleFilled(c, r + S(7), col(0.07f), 32);                      // glow
+    for (int i = 0; i < 4; i++) {                                         // the ring, in four arcs
+        float a0 = spin + i * 1.5707963f + 0.22f, a1 = a0 + 1.5707963f - 0.44f;
+        d->PathArcTo(c, r, a0, a1, 10); d->PathStroke(col(0.95f), 0, S(2.2f));
+    }
+    for (int i = 0; i < 4; i++) {                                         // ticks pointing in
+        float a = i * 1.5707963f + 0.785f, ca = cosf(a), sa = sinf(a);
+        d->AddLine({c.x + ca * (r + S(3)), c.y + sa * (r + S(3))}, {c.x + ca * (r + S(8)), c.y + sa * (r + S(8))}, col(0.85f), S(2));
+    }
+    d->AddCircleFilled(c, S(2.4f), col(1.0f), 12);                        // the point itself
+}
+
 std::string fmt(const char* f, ...) {
     char b[2048]; va_list a; va_start(a, f); vsnprintf(b, sizeof b, f, a); va_end(a); return b;
 }
@@ -605,7 +634,7 @@ static std::vector<Opt> build_options() {
     B("forced_vsync", "Performance", "Gameplay", "VSync", LIVE_YES, "1", "Frames reach the screen in step with its refresh: no stutter from the two clocks drifting, no tearing.");
 #endif
     B("show_fps", "Graphics", "Gameplay", "FPS counter", LIVE_YES, "0", "Shows the frames per second that reach the screen, in the top-left corner.");
-    I("fov", "Gameplay", "Gameplay", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view: higher shows more of the world. Applies while playing.");
+    I("fov", "Gameplay", "Display", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view: higher shows more of the world. Applies while playing.");
     B("cheats", "Gameplay", "Gameplay", "Cheat codes", LIVE_YES, "1", "Runs the cheats you turn on in the Cheats page (Atmosphere format files in the game's cheats folder).");
     B("green_energy_10x", "Gameplay", "Gameplay", "Green Energy 10x", LIVE_YES, "0", "Less crystal grinding: Green Energy awards are worth 10 times as much (1 / 3 / 6 become 10 / 30 / 60). Energy you already have is not changed, and what you collect stays if you turn this off. After the mod by melos444 on GameBanana.");
     B("cheat_missiles", "Gameplay", "Gameplay", "Missiles don't decrease", LIVE_YES, "0", "Firing missiles doesn't use any. Not while using the Legacy Suit's missile shield.");

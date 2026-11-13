@@ -233,7 +233,8 @@ static void rt_sev(void){}
 
 static void rt_wfe(CPU* c){ (void)c; plat_yield(); }
 extern float fov_code_scale(CPU* c, u64 lr);   /* cheats.c: the field of view hook in the game's own code */
-const RtAPI g_rtapi={swr_svc,rt_undef,rt_note_hint,rt_ticks,rt_brk,rt_fpcr,rt_sev,rt_wfe,fov_code_scale};
+extern volatile u64 g_watch[2]; extern void watch_hit(CPU* c, u64 a, const char* fn);   /* cheats.c: test builds of the game code */
+const RtAPI g_rtapi={swr_svc,rt_undef,rt_note_hint,rt_ticks,rt_brk,rt_fpcr,rt_sev,rt_wfe,fov_code_scale,g_watch,watch_hit};
 
 /* ============================================================ system errors */
 void crash_report(void* host_pc, void* fault, int sig){

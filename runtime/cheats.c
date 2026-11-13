@@ -265,7 +265,9 @@ static void aspect_tick(void){
   u64 cur=0; if(!rd(g_main_base+off,4,&cur)) return;
   float f; u32 c32=(u32)cur; memcpy(&f,&c32,4);
   if(f<1.2f || f>4.1f){ if(!said){ said=1; LOG("aspect: the value at main+%llx is %g, not an aspect ratio: left alone\n",(unsigned long long)off,f); } g_aspect_now=1; return; }
-  if(f!=want){ u32 o32; memcpy(&o32,&want,4); wr(g_main_base+off,4,o32); LOG("aspect: %g (was %g)\n",want,f); }
+  if(f!=want){ u32 o32; memcpy(&o32,&want,4); wr(g_main_base+off,4,o32);
+    /* after a change while playing the game puts its own value back every frame: logged once per change and every 10 s */
+    static float lw; static u64 lt; u64 now=plat_ns(); if(want!=lw || now-lt>10000000000ull){ lw=want; lt=now; LOG("aspect: %g (was %g)\n",want,f); } }
   g_aspect_now=want/(16.0f/9.0f); }
 
 /* The field of view hook in the game's code (metroid_perf.py, v1.1.0): the projection builder asks for a factor on its
@@ -274,11 +276,71 @@ static void aspect_tick(void){
    keep theirs. Clamped so the whole angle stays under 170 degrees for the widest the game uses */
 static volatile int g_fov_code;   /* the game asked: the hook is in its code */
 volatile float g_fov_comp=1.0f;   /* the near layer's enlargement for the field of view setting (renderers read it) */
+/* test only (a game code build with SWR_WATCH_READS): SWR_WATCH_CAMERA=1 watches the first-person camera's projection
+   fields (+352..+480 of the object the builder writes) and logs each game function that reads them, once per field */
+volatile u64 g_watch[2]; static u64 g_watch_base;
+void watch_hit(CPU* c, u64 a, const char* fn){ (void)c;
+  if(!strcmp(fn,"F_8050820")) return;   /* the builder itself */
+  static char seen[400][24]; static u32 off_[400]; static int n;
+  u32 o=(u32)(a-g_watch_base); for(int i=0;i<n;i++) if(off_[i]==o && !strcmp(seen[i],fn)) return;
+  if(n<400){ snprintf(seen[n],24,"%s",fn); off_[n]=o; n++; LOG("watch: %s reads camera +%u\n",fn,o); } }
+static volatile float g_fov_seen[8]; static volatile int g_fov_seen_n;   /* the camera angles widened lately */
 float fov_code_scale(CPU* c, u64 lr){
   (void)c; g_fov_code=1;
+  if((lr>>62)==1){ /* another tan() in the game code (metroid_perf.py): v0 is the angle it takes the tangent of. Widened when
+                      twice the angle is the camera's: the level's sections are culled with these (grey sky at the sides of
+                      the tram tunnel otherwise). Tests: SWR_FOV_SITES=none, or hex,... (offsets of main) for only those */
+    int trig=(lr>>61)&1;   /* a cos() or sin() site (metroid_perf.py _TRIG_SITE): only widened when SWR_FOV_TRIG asks */
+    lr&=~(3ull<<61); u64 o=lr-0x8006000ull; float a=c->v[0].f[0];
+    if(trig){ static int init; static u64 tl[32]; static int tn, tall;
+      if(!init){ init=1; const char* e=getenv("SWR_FOV_TRIG"); if(e && !strcmp(e,"all")) tall=1; while(e && *e && !tall && tn<32){ char* end; tl[tn++]=strtoull(e,&end,16); e= *end==','? end+1 : NULL; } }
+      static u64 seen[64]; static int ns; int known=0; for(int j=0;j<ns;j++) known|= seen[j]==o;
+      if(!known && ns<64){ seen[ns++]=o; LOG("fov: trig site main+%llx, angle %.2f degrees (twice: %.2f)\n",(unsigned long long)o,a*57.29578f,a*114.59156f); }
+      int want=tall; for(int j=0;j<tn;j++) want|= tl[j]==o;
+      if(!want || g_opt_fov==100) return 1.0f;
+      int hit=0; for(int j=0;j<8;j++) hit|= g_fov_seen[j]>0.0f && fabsf(g_fov_seen[j]-2.0f*a)<0.0087f;
+      if(!hit) return 1.0f;
+      float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f; return k; }
+    static u64 site[64]; static u32 cnt[64]; static int n; int i=0; for(;i<n;i++) if(site[i]==o) break;
+    if(i==n && n<64){ site[n]=o; cnt[n]=0; n++;
+      LOG("fov: tan site main+%llx, angle %.2f degrees (twice: %.2f)\n",(unsigned long long)o,a*57.29578f,a*114.59156f); }
+    static int stats=-1; if(stats<0) stats=getenv("SWR_FOV_SITES")!=NULL;   /* the 10 s tallies: tests only */
+    if(i<64 && stats){ cnt[i]++; extern int g_frames; static int last; if(g_frames-last>=600){ last=g_frames;   /* every 10 s: how often each runs */
+        char buf[1500]; int p=0; for(int j=0;j<n && p<1400;j++) if(cnt[j]) p+=snprintf(buf+p,sizeof buf-p," %llx:%u",(unsigned long long)site[j],cnt[j]);
+        LOG("fov: tan sites in the last 600 frames:%s\n",buf); for(int j=0;j<n;j++) cnt[j]=0; } }
+    static int init; static u64 only[32]; static int nonly, all;
+    if(!init){ init=1; const char* e=getenv("SWR_FOV_SITES"); all= !e || !*e || !strcmp(e,"all"); if(e && !strcmp(e,"none")) e=NULL;
+      while(e && *e && !all && nonly<32){ char* end; only[nonly++]=strtoull(e,&end,16); e= *end==','? end+1 : NULL; } }
+    int want=all; for(int j=0;j<nonly;j++) want|= only[j]==o;
+    /* only the gameplay camera's angles (53-55 degrees): the minimap hologram is drawn with a 30-degree camera, and once a
+       30-degree view had been widened elsewhere it matched too, shrank and moved to the middle (F8 2026-11-12 16:14:40) */
+    if(all && a*114.59156f<40.0f) want=0;
+    /* main+1B21C0 projects points to the screen for the HUD: widened, the minimap hologram came out small and off to the
+       left at 21:9 (bisected at the save station, 2026-11-12) */
+    if(all && o==0x1b21c0) want=0;
+    if(!want || g_opt_fov==100) return 1.0f;
+    int hit=0; for(int j=0;j<8;j++) hit|= g_fov_seen[j]>0.0f && fabsf(g_fov_seen[j]-2.0f*a)<0.0087f;
+    if(!hit) return 1.0f;
+    float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f; return k; }
+  if((lr>>63) && getenv("SWR_FOV_NO_FRUSTUM")) return 1.0f;   /* test only: the visibility frustums keep the game's angle */
+  if(lr>>63){ /* a visibility frustum (main+52E78 and +EAA10, the same parameters as a projection): widened by the same
+                 factor when its angle is one the camera's projection was just widened for, so nothing at the new edges
+                 is culled before it is drawn (objects popping in). Light and shadow frustums have other angles */
+    lr&=~(1ull<<63); float a=c->v[0].f[0]; int hit=0;   /* within half a degree: the camera's angle moves while it zooms */
+    for(int i=0;i<8;i++) hit|= g_fov_seen[i]>0.0f && fabsf(g_fov_seen[i]-a)<0.0087f;
+    { static u64 seen[32]; static int n; int known=0; for(int i=0;i<n;i++) known|= seen[i]==lr;
+      if(!known && n<32){ seen[n++]=lr; LOG("fov: frustum asked for from main+%llx, field of view %.1f degrees (%s)\n",(unsigned long long)(lr-0x8006000ull),c->v[0].f[0]*57.29578f,hit? "the camera's: widened" : "left as it is"); } }
+    if(!hit || g_opt_fov==100) return 1.0f;
+    float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f;
+    /* look-ahead: the frustum a bit wider than the picture, so what is about to come in at the edges counts as seen and
+       the game streams its textures and models before it is on screen (pop-in at the edges at 160%, 2026-11-12).
+       SWR_FOV_MARGIN=1.0 off; the half angle stays under 80 degrees */
+    static float m=-1; if(m<0){ const char* e=getenv("SWR_FOV_MARGIN"); m= e? (float)atof(e) : 1.15f; if(m<1.0f) m=1.0f; if(m>1.6f) m=1.6f; }
+    float km=k*m; if(a*0.5f*km>1.396f) km=1.396f/(a*0.5f); if(km<k) km=k; return km; }
   u64 o= lr-0x8006000ull;
   /* every perspective projection but the 90-degree ones (reflection probe faces, which must meet at the edges). The
      community mod's three caller ranges missed the first-person camera itself (main+131FA0 and +133694, 55 degrees) */
+  { static int w=-1; if(w<0) w=getenv("SWR_WATCH_CAMERA")!=NULL; if(w && o==0x133694 && !g_watch_base){ g_watch_base=c->x[19]; g_watch[0]=c->x[19]+352; g_watch[1]=c->x[19]+480; LOG("watch: camera object at %llx\n",(unsigned long long)c->x[19]); } }
   float deg=c->v[0].f[0]*57.29578f;
   int cam= deg>10.0f && deg<150.0f && fabsf(deg-90.0f)>0.5f;
   { /* test only: SWR_FOV_ONLY=hex,hex... widens only the callers at those offsets of main */
@@ -297,6 +359,8 @@ float fov_code_scale(CPU* c, u64 lr){
         (unsigned long long)c->x[19],(unsigned long long)c->x[20],(unsigned long long)(lr2-0x8006000ull)); } }
   if(g_opt_fov==100){ g_fov_comp=1.0f; return 1.0f; }
   if(!cam) return 1.0f;
+  { float a=c->v[0].f[0]; int have=0; for(int i=0;i<8;i++) have|= g_fov_seen[i]==a;
+    if(!have){ g_fov_seen[g_fov_seen_n&7]=a; g_fov_seen_n++; } }
   float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f;
   { /* what the renderers enlarge the arm cannon and visor layer by to undo the wider projection (gpu_gl.c): the ratio
        of the two tangents of the half angle */

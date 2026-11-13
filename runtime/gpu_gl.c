@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include "glfn.h"
 #include "shader.h"
+#include "../third_party/zstd/zstd.h"   /* the game files' shader banks (pak_scan_file) */
 #ifdef _WIN32
 #include <windows.h>
 #include <stdbool.h>
@@ -375,7 +376,9 @@ static void astc_decode_par(const u8* src, u32 w, u32 h, u32 bw, u32 bh, u8* dst
    turns every GPU fence the game waited on became a hitch of up to 300 ms. Now the small mip levels (128 px and less)
    decode at once and the texture shows from those, the large levels decode on a few threads and get uploaded at the
    next frames (a short blur instead of a stall). SWR_ASTC_SYNC=1 decodes everything at once */
-typedef struct AJob { struct AJob* next; struct AJob* anext; Tex* t; u32 gen, level, layer, w, h, bw, bh; u8* src; u8* dst; int done; } AJob;
+typedef struct AJob { struct AJob* next; struct AJob* anext; Tex* t; u32 gen, level, layer, w, h, bw, bh; u8* src; u8* dst; int done; u64 t_push; } AJob;
+/* how late the sharp levels arrive (the texture pop-in): push to upload, logged every 10 s */
+static u64 g_aj_n, g_aj_sum, g_aj_max, g_aj_px, g_aj_last; static u32 g_aj_queued;
 static struct { PMutex lk; PCond cv; AJob* todo; AJob** todo_tail; AJob* all; int init, nth; } g_aj;
 static void aj_thread(void* arg){ (void)arg;
   for(;;){ pm_lock(&g_aj.lk); while(!g_aj.todo) pc_wait(&g_aj.cv,&g_aj.lk,1000000000ll);
@@ -390,7 +393,7 @@ static int aj_on(void){
   return g_aj.nth>0; }
 static void aj_push(Tex* t, u32 level, u32 layer, u32 w, u32 h, u32 bw, u32 bh, const u8* lin, size_t n){
   AJob* j=calloc(1,sizeof *j); j->src=malloc(n); if(!j->src){ free(j); return; } memcpy(j->src,lin,n);
-  j->t=t; j->gen=t->agen; j->level=level; j->layer=layer; j->w=w; j->h=h; j->bw=bw; j->bh=bh; t->apend++;
+  j->t=t; j->gen=t->agen; j->level=level; j->layer=layer; j->w=w; j->h=h; j->bw=bw; j->bh=bh; t->apend++; j->t_push=plat_ns(); g_aj_queued++;
   pm_lock(&g_aj.lk); j->anext=g_aj.all; g_aj.all=j; *g_aj.todo_tail=j; g_aj.todo_tail=&j->next; pc_signal(&g_aj.cv); pm_unlock(&g_aj.lk); }
 /* a texture going away or getting new data: its pending levels are dropped */
 static void aj_forget(Tex* t){ if(!g_aj.nth || !t->apend) return;
@@ -407,6 +410,9 @@ static void aj_drain(void){
   pm_lock(&g_aj.lk); for(AJob** pp=&g_aj.all;*pp;){ AJob* j=*pp; u64 n=((u64)j->w*j->h*4+255)&~255ull;
       if(j->done && (!j->t || used+n<=budget || !used)){ *pp=j->anext; j->anext=fin; fin=j; if(j->t) used+=n; } else pp=&j->anext; }
   pm_unlock(&g_aj.lk);
+  { u64 now=plat_ns(); for(AJob* j=fin;j;j=j->anext){ if(g_aj_queued) g_aj_queued--; if(!j->t) continue; u64 l=now-j->t_push; g_aj_n++; g_aj_sum+=l; if(l>g_aj_max) g_aj_max=l; g_aj_px+=(u64)j->w*j->h; }
+    if(now-g_aj_last>10000000000ull){ if(g_aj_last && g_aj_n) LOG("textures: ASTC sharp levels arrived %.0f ms after they were needed on average, %.0f ms at worst (%llu levels, %.1f Mpixels, %u still queued)\n",g_aj_sum/1e6/g_aj_n,g_aj_max/1e6,(unsigned long long)g_aj_n,g_aj_px/1e6,g_aj_queued);
+      g_aj_last=now; g_aj_n=g_aj_sum=g_aj_max=g_aj_px=0; } }
   for(AJob* j=fin;j;){ AJob* nx=j->anext; Tex* t=j->t;
     if(t && j->dst && j->gen==t->agen){ glBindTexture(t->target,t->id); glPixelStorei(GL_UNPACK_ALIGNMENT,1); glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
       const void* px=j->dst;
@@ -497,6 +503,7 @@ static void gr_rows(void* c, u32 a, u32 b){ GrJob* j=c; u64 o=(u64)a<<20, e=(u64
   while(o<e){ u64 g=j->gva+o, n=0x1000-(g&0xFFF); if(n>e-o) n=e-o; u64 cpu=gmmu_translate(g); if(cpu) memcpy(j->dst+o,GP(cpu),n); else memset(j->dst+o,0,n); o+=n; } }
 static void gmem_read_par(u64 gva, u8* dst, u64 size){ if(g_cs_any) cs_mem_need(gva,size); GrJob j={dst,gva,size}; pf_run(gr_rows,&j,(u32)((size+(1u<<20)-1)>>20),8); }
 static inline void lin_rel(u8* lin, int bps){ if(bps<0) upload_release(&upload_linear,lin); }
+#include "astc_gl.inc"
 static u64 g_upl_t0;
 static u64 st_tchk_ns, st_tupl_ns, st_tb_lookup, st_tb_samp, st_tb_rest, st_tb_bind, st_tb_crop, st_tb_lay, st_tb_vol, st_tb_pre;   /* texture time split: change-check hashing, uploads */
 static void tex_upload_(Tex* t);
@@ -506,7 +513,7 @@ static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t-
   t->agen++; aj_forget(t); int a_async=0;
   /* ASTC arrays: the leading levels over 32x32 of every layer decode in the background as well (Prime 4 streams
      256x256x64 and 512x512x16 arrays while you walk: 10-25 ms each on this thread, a hitch per texture) */
-  int a_arr=0; if(t->f.astc && t->target==GL_TEXTURE_2D_ARRAY && t->levels>1 && aj_on()){ while(a_arr+1<(int)t->levels && (u64)(t->w>>a_arr)*(t->h>>a_arr)>32u*32u) a_arr++; }   /* each layer of a level is its own job: down to 64x64, a layer is small enough that only the job count matters */
+  int a_arr=0; if(t->f.astc && t->target==GL_TEXTURE_2D_ARRAY && t->levels>1 && !astc_gpu_on() && aj_on()){ while(a_arr+1<(int)t->levels && (u64)(t->w>>a_arr)*(t->h>>a_arr)>32u*32u) a_arr++; }   /* each layer of a level is its own job: down to 64x64, a layer is small enough that only the job count matters */
   { static int said; t->nup++; if(said<4000 && getenv("SWR_TRACE_UPLOADS") && plat_ns()-g_upl_t0>(u64)atoi(getenv("SWR_TRACE_UPLOADS"))*1000000000ull){ said++; LOG("texture upload %ux%ux%u levels %u fkey %x %llu KB (upload %u)\n",t->w,t->h,t->d,t->levels,t->fkey,(unsigned long long)t->size>>10,t->nup); } }
   { static int e=-1; if(e<0){ e=getenv("SWR_UPLOAD_COPY")!=NULL; if(e) g_upload_direct=0; } }
   const GlFmt* f=&t->f;
@@ -549,6 +556,15 @@ static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t-
       else { for(u32 y=0;y<th;y++) memcpy(lin+(u64)y*rowb,src+(u64)y*t->pitch,rowb); }
       upload_unpack_ns+=plat_ns()-upload_stage; upload_stage=plat_ns();
       const u8* up=lin; u8* dec=NULL;
+      if(f->astc && t->target!=GL_TEXTURE_1D && astc_gpu_on()){   /* decoded on the GPU into a pixel buffer, filled from it at once (astc_gl.inc) */
+        astc_gpu_decode(lin,lw,lh,t->target==GL_TEXTURE_3D? ld : 1,f->bw,f->bh);
+        upload_decode_ns+=plat_ns()-upload_stage; upload_stage=plat_ns();
+        if(t->target==GL_TEXTURE_2D) glTexSubImage2D(GL_TEXTURE_2D,l,0,0,lw,lh,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+        else if(t->target==GL_TEXTURE_2D_ARRAY || t->target==GL_TEXTURE_CUBE_MAP_ARRAY) glTexSubImage3D(t->target,l,0,0,layer,lw,lh,1,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+        else if(t->target==GL_TEXTURE_CUBE_MAP) glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X+layer,l,0,0,lw,lh,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+        else if(t->target==GL_TEXTURE_3D) glTexSubImage3D(GL_TEXTURE_3D,l,0,0,0,lw,lh,ld,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER,0); upload_driver_ns+=plat_ns()-upload_stage;
+        lin_rel(lin,bps); if(!direct) upload_release(&upload_source,src); off+= t->bl? lsz : (u64)t->pitch*th; continue; }
       if((f->astc||f->dec) && !(dec=upload_buffer(&upload_decoded,(u64)lw*lh*(t->target==GL_TEXTURE_3D? ld : 1)*4+64))){ upload_release(&upload_linear,lin); if(!direct) upload_release(&upload_source,src); off+= t->bl? lsz : (u64)t->pitch*th; continue; }
       if((f->astc && t->target==GL_TEXTURE_2D && layers==1 && l+1<t->levels && a_async==(int)l && (u64)lw*lh>128u*128u && aj_on()) || (int)l<a_arr){
         aj_push(t,l,layer,lw,lh,f->bw,f->bh,lin,(size_t)rowb*th); if(!a_arr) a_async++;
@@ -1135,8 +1151,11 @@ static Tex* tex_from_tic_(u32* tic){
           u64 hq=plat_ns(); u64 sh=sample_hash(gva,t->size); st_tchk_ns+=plat_ns()-hq; t->frame_checked=g_frame;
           if(sh==t->shash){ t->next_check=g_frame+20+((u32)(gva>>9)&7); return t; }
           t->stable=0; }
-        if(g_tex_bud>0 || t->stable<4){ t->frame_checked=g_frame; g_tex_bud-=(i64)(t->size>>(t->size>65536? 1 : 0)); st_tex_chk+=t->size;
+        if(g_tex_bud>0 || t->stable<4){ u32 prevchk=t->frame_checked; t->frame_checked=g_frame; g_tex_bud-=(i64)(t->size>>(t->size>65536? 1 : 0)); st_tex_chk+=t->size;
           u64 hq=plat_ns(); u64 hh=mem_hash(gva,t->size); st_tchk_ns+=plat_ns()-hq; if(hh!=t->hash){
+            { /* the texture pop-in hunt: new data found by the polled check, up to this many frames after it landed */
+              static u32 n, mx, last; static u64 sum; u32 late=g_frame-prevchk; if(late<100000){ n++; sum+=late; if(late>mx) mx=late; }
+              if(g_frame-last>=600){ if(last && n) LOG("textures: %u changes found by the polled check, up to %.1f frames after they landed on average, %u at worst\n",n,(double)sum/n,mx); last=g_frame; n=mx=0; sum=0; } }
             /* the honeycomb holes hunt: a long-stable texture changed and the sampled checks hadn't seen it */
             if(t->stable>=40 && t->d>1){ static int said; if(said<200){ said++; LOG("gpu: array texture %ux%ux%u at %llx fmt %x changed, unseen by the sampled check for up to %d frames\n",t->w,t->h,t->d,(unsigned long long)gva,t->fkey,(int)(g_frame-t->tfull)); } }
             t->hash=hh; tex_upload(t); t->stable=0; } else if(t->stable<100000) t->stable++;
@@ -1228,6 +1247,11 @@ typedef struct {u32 idx,off,value;} TransDep;
 typedef struct Translated {u64 key;ShaderInfo si;char*src;u32 ndep;TransDep dep[128];struct Translated*next;int chk;} Translated;   /* chk: 0 unchecked, 1 usable, 2 old loop translation */
 static Translated* translated[512];static u32 translated_count,translated_hits;
 static TransDep trans_dep[128];static u32 trans_ndep;static int trans_overflow;
+/* Tried 2026-11-12 and reverted: caching translations made without their jump table (a failed read kept as a condition)
+   let draws use the "can jump anywhere" versions, which are far heavier on the GPU: 43 and 29 FPS instead of 60, more
+   draws waiting. The exact version, translated at the first draw with the table, stays the fast one */
+#define TDEP_FAILED 0x80000000u
+static int g_tr_nostate;
 static int trans_cb_read(u32 idx,u32 off,u32*out){
   int ok=sh_cb_read(idx,off,out);/* Record failed reads too: their availability can change. */
   if(!ok){trans_overflow=1;return 0;}
@@ -1252,7 +1276,7 @@ static u64 translated_key(u64 hash,int stage,u32 key2,const ShaderInfo*input){
 }
 static Translated*translated_get(u64 key){
   for(Translated*t=translated[(u32)(key^(key>>32))&511];t;t=t->next)if(t->key==key){
-    int ok=1;for(u32 i=0;i<t->ndep;i++){u32 v;if(!sh_cb_read(t->dep[i].idx,t->dep[i].off,&v)||v!=t->dep[i].value){ok=0;break;}}
+    int ok=1;for(u32 i=0;i<t->ndep;i++){u32 v;if(!sh_cb_read(t->dep[i].idx,t->dep[i].off,&v)||v!=t->dep[i].value){ok=0;break;}}   /* entries of the reverted try (idx bit 31) never match */
     /* translated before loops were structured (shader.c, 2026-11-08): the pc switch for a plain loop; translate again.
        Newer dispatcher output carries the swr-loop1 mark (a shader that still needs it) */
     if(ok && !t->chk){ static int nl=-1; if(nl<0) nl=getenv("SWR_SHADER_NOLOOP")!=NULL; t->chk= !nl && t->src && strstr(t->src,"switch(pc)") && !strstr(t->src,"swr-loop1")? 2 : 1; }
@@ -2291,7 +2315,7 @@ static void apply_state(GpuChannel* ch){
        shrank toward the centre. Their perspective vertices are enlarged back (shader.c swr_hudfix) */
     extern volatile float g_fov_comp; float k=1.0f;
     if(g_fov_comp>1.0001f && g_nrt>0 && g_rt[0] && ((g_rt[0]->w==1600 && g_rt[0]->h==900) || (g_rt[0]->w==1280 && g_rt[0]->h==720))
-       && g_dl_dr[0]<0.001f && g_dl_dr[1]>0.999f) k=g_fov_comp;
+       && g_dl_dr[0]<0.001f && (g_dl_dr[1]>0.999f || fabsf(g_dl_dr[1]-0.03125f)<0.0005f)) k=g_fov_comp;   /* the HUD (0..1) and the visor's front layer (0..1/32: the red hit overlay) */
     hud_fov(k); }
   /* raster state (winding flips with the Y flip) */
   { float w=2*fabsf_(sx), h=2*fabsf_(sy); int yflip= (w<1||h<1)? 0 : (sy<0);
@@ -4349,6 +4373,7 @@ static void warm_load(void){
       if(g_worker!=1){
         if(g_pcache>0 && (st!=ST_VS || strstr(src,"gl_Position = vec4(0.0, 0.0, 0.0, 1.0)"))){
           char path[160];snprintf(path,sizeof path,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
+          static u32 nboot; if(++nboot>10000){ free(src); continue; }   /* at most 10,000 before the first frame (16 s for 7,626 on 2026-11-09): the rest load when the game loads them */
           GLuint p=binary_load(path,1);if(p){ warm_stage_put(key,p,ULOC_LAZY); if(wp_n>=wp_cap){ wp_cap= wp_cap? wp_cap*2 : 1024; wp=realloc(wp,wp_cap*sizeof *wp); } wp[wp_n++]=p; }
           else if(g_helper>0 && !backend_file_exists(path) && hp_job_worth(src)){ u32 sl=a, gt= st==ST_VS? GL_VERTEX_SHADER : st==ST_GS? GL_GEOMETRY_SHADER : GL_FRAGMENT_SHADER; u8* b=malloc((size_t)sl+20);
             if(b){ memcpy(b,"SWRJ",4); memcpy(b+4,&gt,4); memcpy(b+8,&sl,4); memcpy(b+12,src,sl); memcpy(b+12+sl,"SWRJOBOK",8);
@@ -4400,6 +4425,7 @@ int g_opt_prebuild=1;
 extern int shader_program_check(const u8* code, u32 max_bytes, u32* out_len, int* type);
 void (*g_backend_status)(const char* text);   /* the window title (backend_win32.c sets it); NULL elsewhere */
 static void backend_status(const char* t){ if(g_backend_status) g_backend_status(t); }
+static int g_pb_noread;
 static int pb_no_cb(u32 idx, u32 off, u32* out){ (void)idx; (void)off; *out=0; trans_overflow=1; return 0; }   /* no GPU state yet */
 /* SWR_SHADER_SCAN=t1,t2,..: at those seconds, count the valid shader programs in GPU memory (every nvmap buffer),
    to see whether a game has its shaders in memory before it draws with them (diagnostic) */
@@ -4504,7 +4530,7 @@ static MpJob g_mpj[64]; static int g_mpj_n;
    float(bitfieldExtract(..)) is float data, packed 16-bit pairs included. Right for all 132 vertex shaders drawn in the
    first area (21 with integer attributes) */
 static u32 vs_guess_int_attrs(const char* src){
-  static signed char track[1024]; memset(track,-1,sizeof track); u32 voted=0, mask=0;
+  signed char track[1024]; memset(track,-1,sizeof track); u32 voted=0, mask=0;   /* on the stack: the seed's translator thread uses this too */
   const char* q=src? strstr(src,"void main") : NULL; if(!q) return 0;
   while(*q){ const char* e=strchr(q,'\n'); size_t len= e? (size_t)(e-q) : strlen(q), n= len<2047? len : 2047;
     char line[2048]; memcpy(line,q,n); line[n]=0; q+= e? len+1 : len;
@@ -4590,6 +4616,158 @@ static void mp_scan_thread(void* arg){ plat_diag_role("shader-scan"); (void)arg;
     woke=0;
     { u64 until=plat_ns()+(pass<10? 2000000000ull : 5000000000ull);   /* or sooner when a draw found a shader it had missed */
       while(plat_ns()<until){ if(__atomic_exchange_n(&g_mp_wake,0,__ATOMIC_ACQ_REL)){ woke=1; break; } plat_sleep_ns(20000000); } } } }
+/* Every shader from the game files, the way the Tears of the Kingdom recomp builds its 29,239 before play: Prime 4 keeps
+   them in its materials (MTRL resources of the RFRM "PACK" archives in romfs, uncompressed, each with its programs in the
+   usual SPH wrapper). pak_walk calls back with each valid vertex or pixel program it finds, deduplicated by the same hash
+   the GPU memory scan uses. Table of contents: TOCC form -> ADIR chunk, u32 count at +24, 60-byte entries from +28:
+   type, 16-byte id, two u32, u64 offset, u64 size, u64 unpacked size, u64 */
+typedef void (*PakShaderFn)(const u8* code, u32 len, int stage, u64 hash, void* ctx);
+static u64 g_pak_code_bytes;   /* the unique programs' own length, header and code */
+#ifndef _WIN32
+#define _fseeki64 fseeko
+#endif
+static u32 pak_scan_file(const char* path, PakShaderFn fn, void* ctx, u64* seen, u32* nseen, u64* bytes){
+  FILE* f=fopen(path,"rb"); if(!f) return 0; u32 found=0;
+  u8* hd=malloc(8u<<20); size_t hn= hd? fread(hd,1,8u<<20,f) : 0;
+  u8* adir=NULL; for(size_t i=0;hd && i+32<=hn;i++) if(!memcmp(hd+i,"ADIR",4)){ adir=hd+i; break; }
+  if(adir){ u32 n; memcpy(&n,adir+24,4);
+    for(u32 k=0;k<n && (size_t)(adir-hd)+28+(k+1)*60<=hn;k++){ const u8* e=adir+28+k*60; if(memcmp(e,"MTRL",4)) continue;
+      u64 off,sz,sz2; memcpy(&off,e+28,8); memcpy(&sz,e+36,8); memcpy(&sz2,e+44,8);
+      if(sz!=sz2 || sz<64 || sz>(256ull<<20)) continue;
+      u8* m=malloc(sz); if(!m) continue;
+      if(_fseeki64(f,(long long)off,SEEK_SET) || fread(m,1,sz,f)!=sz){ free(m); continue; } *bytes+=sz;
+      /* two zstd layers: the material (after its 32-byte RFRM header) unpacks to an SNVN shader bank, which holds each
+         shader as its own zstd frame (found 2026-11-12: the 12 shaders captured from GPU memory are there byte for byte) */
+      static u8* ob; static size_t obcap; static u8* ib; static size_t ibcap;
+      unsigned long long ms=ZSTD_getFrameContentSize(m+32,sz-32); size_t need= ms<(1ull<<31)? (size_t)ms : (256u<<20);
+      if(obcap<need){ free(ob); ob=malloc(need); obcap= ob? need : 0; }
+      size_t r= ob? ZSTD_decompress(ob,obcap,m+32,sz-32) : 0; free(m); if(!ob || ZSTD_isError(r)) continue;
+      for(size_t j=0;j+8<r;j++){ if(memcmp(ob+j,"\x28\xb5\x2f\xfd",4)) continue;
+        size_t fl=ZSTD_findFrameCompressedSize(ob+j,r-j); if(ZSTD_isError(fl)) continue;
+        unsigned long long cs=ZSTD_getFrameContentSize(ob+j,fl); size_t in_need= cs<(64ull<<20)? (size_t)cs+64 : (64u<<20);
+        if(ibcap<in_need){ free(ib); ib=malloc(in_need); ibcap= ib? in_need : 0; } if(!ib){ j+=fl-1; continue; }
+        size_t q=ZSTD_decompress(ib,ibcap,ob+j,fl); if(ZSTD_isError(q)){ continue; }
+        for(size_t o=0;o+128<=q;o+=4){ u32 w0; memcpy(&w0,ib+o,4); if(((w0>>5)&31)!=3 || ((w0&31)!=1 && (w0&31)!=2)) continue;
+          u32 avail= q-o>0x10000? 0x10000 : (u32)(q-o), len=0; int ty=0; if(!shader_program_check(ib+o,avail,&len,&ty)) continue;
+          int stage= ty==1? ST_VS : ty==5? ST_FS : -1; if(stage<0) continue;
+          u32 hl; u64 hh=shader_hash(ib+o,avail,&hl); u64 kk=(hh^(u64)(stage+1))|1; u32 i=(u32)(kk^(kk>>31))&0x3FFFF;
+          while(seen[i] && seen[i]!=kk) i=(i+1)&0x3FFFF;
+          if(!seen[i] && *nseen<200000){ seen[i]=kk; (*nseen)++; found++; g_pak_code_bytes+=len; if(fn) fn(ib+o,len,stage,hh,ctx); }
+          o+= len>4? ((len-4)&~3u) : 0; }
+        j+=fl-1; } } }
+  free(hd); fclose(f); return found; }
+static void pak_walk_dir(const char* dir, PakShaderFn fn, void* ctx, u64* seen, u32* nseen, u64* bytes, u32* npak){
+  PDir d; if(plat_dir_open(&d,dir)) return;
+  while(plat_dir_next(&d)){ char p[1400]; snprintf(p,sizeof p,"%s/%s",dir,d.name);
+    if(d.is_dir) pak_walk_dir(p,fn,ctx,seen,nseen,bytes,npak);
+    else { size_t l=strlen(d.name); if(l>4 && !strcmp(d.name+l-4,".pak")){ pak_scan_file(p,fn,ctx,seen,nseen,bytes); (*npak)++; } } }
+  plat_dir_close(&d); }
+/* The seed (like the TotK recomp's seed-programs.bin): every program from the game files in one file,
+   shader_cache/seed.bin: "SWRSEED1", u64 signature of the paks (their count and sizes), u32 count, then per program
+   u64 hash, u32 stage, u32 length, the program. Made by a background scan at the first start (about 13 s, 540 MB),
+   afterwards only its index is read. The pre-build takes from it whenever the game's own new shaders are all done */
+typedef struct { u64 h, off; u32 len; int stage; } SeedEnt;
+static SeedEnt* g_seed; static u32 g_seed_n, g_seed_cap, g_seed_next; static FILE* g_seed_f; static volatile int g_seed_ready;
+static u64 g_seed_wpos, g_seed_sig;
+static void seed_put(const u8* code, u32 len, int stage, u64 h, void* ctx){ FILE* f=ctx; u32 st=(u32)stage;
+  if(fwrite(&h,8,1,f)!=1 || fwrite(&st,4,1,f)!=1 || fwrite(&len,4,1,f)!=1 || fwrite(code,1,len,f)!=len) return;
+  if(g_seed_n==g_seed_cap){ g_seed_cap= g_seed_cap? g_seed_cap*2 : 65536; g_seed=realloc(g_seed,g_seed_cap*sizeof *g_seed); }
+  g_seed[g_seed_n++]=(SeedEnt){h,g_seed_wpos+16,len,stage}; g_seed_wpos+=16+len; }
+static u64 pak_signature(const char* dir){ u64 s=0x9E3779B97F4A7C15ull; PDir d; if(plat_dir_open(&d,dir)) return s;
+  while(plat_dir_next(&d)){ char p[1400]; snprintf(p,sizeof p,"%s/%s",dir,d.name);
+    if(d.is_dir) s^=pak_signature(p)*31; else { size_t l=strlen(d.name); if(l>4 && !strcmp(d.name+l-4,".pak")) s=(s^d.size^((u64)l<<40))*0x100000001B3ull; } }
+  plat_dir_close(&d); return s; }
+static void seed_thread(void* arg){ (void)arg; plat_diag_role("shader-seed"); plat_thread_low_priority();
+  extern char g_romfs_dir_override[1024]; char root[1200];
+  if(g_romfs_dir_override[0]) snprintf(root,sizeof root,"%s",g_romfs_dir_override); else snprintf(root,sizeof root,"%sromfs",g_datadir);
+  u64 sig=pak_signature(root), t0=plat_ns(); const char* path="shader_cache/seed.bin"; g_seed_sig=sig;
+  FILE* f=fopen(path,"rb"); char mg[8]; u64 fs=0; u32 n=0;
+  if(f && fread(mg,1,8,f)==8 && !memcmp(mg,"SWRSEED1",8) && fread(&fs,8,1,f)==1 && fs==sig && fread(&n,4,1,f)==1){   /* the index only */
+    g_seed_cap=n? n : 1; g_seed=malloc(g_seed_cap*sizeof *g_seed); u64 pos=20;
+    for(u32 i=0;i<n;i++){ u64 h; u32 st,len; if(fread(&h,8,1,f)!=1 || fread(&st,4,1,f)!=1 || fread(&len,4,1,f)!=1 || len>0x10000 || _fseeki64(f,len,SEEK_CUR)) break;
+      g_seed[g_seed_n++]=(SeedEnt){h,pos+16,len,(int)st}; pos+=16+len; }
+    g_seed_f=f; LOG("shaders: seed of the game files' shaders: %u programs (index read in %.0f ms)\n",g_seed_n,(plat_ns()-t0)/1e6); }
+  else { if(f) fclose(f);
+    plat_mkdir("shader_cache"); FILE* w=fopen("shader_cache/seed.tmp","wb"); if(!w) return; u32 zero=0;
+    fwrite("SWRSEED1",1,8,w); fwrite(&sig,8,1,w); fwrite(&zero,4,1,w); g_seed_wpos=20;
+    u64* seen=calloc(1u<<18,8); u32 nseen=0, npak=0; u64 bytes=0; if(!seen){ fclose(w); return; }
+    pak_walk_dir(root,seed_put,w,seen,&nseen,&bytes,&npak); free(seen);
+    fseek(w,16,SEEK_SET); fwrite(&g_seed_n,4,1,w); fclose(w); remove(path);
+    if(rename("shader_cache/seed.tmp",path)){ LOG("shaders: the seed could not be saved\n"); return; }
+    g_seed_f=fopen(path,"rb");
+    LOG("shaders: seed made from the game files: %u programs, %.0f MB, from %u paks (%.0f MB of materials) in %.1f s; they are built in the background while you play\n",
+        g_seed_n,g_seed_wpos/1048576.0,npak,bytes/1048576.0,(plat_ns()-t0)/1e9); }
+  if(g_seed_f) __atomic_store_n(&g_seed_ready,1,__ATOMIC_RELEASE); }
+/* The seed's translator thread: shader_to_glsl and its post passes, the expensive part, on a core of its own (on the GL
+   thread they took it to 97% and the game to 30 FPS). Each result, with the same cache key and the same variants as the
+   pre-build makes (integer textures, integer attributes), comes back through g_sq; the GL thread files it in the
+   translated cache (seed_drain), and only then does the pre-build take that program (seed_feed), which finds it
+   translated and just hands it to the helper processes to build. Shaders that read constant data while translating
+   can't be done ahead of their draws and are left for the game to load */
+typedef struct { u64 tk; int stage; u32 idx, ndep; ShaderInfo si; char* src; TransDep dep[128]; } SeedTr;   /* src NULL: seed entries before idx are done */
+#define SQN 256
+static SeedTr g_sq[SQN]; static volatile u32 g_sq_w, g_sq_r, g_seed_drained; static u32 g_seed_tr_n, g_seed_tr_skip;
+static u8* g_seed_ok;   /* per seed program: 1 translated ahead (the others read the game's data: left for when it loads them) */
+#define SEED_TR_PATH "shader_cache/seed_tr_v" TR_STR(TR_VER) ".bin"   /* which seed programs this translator version did */
+static __thread int t_seed_overflow; static __thread u32 t_seed_ndep; static __thread TransDep t_seed_dep[128];
+static int seed_no_cb(u32 idx, u32 off, u32* out){ (void)idx; (void)off; *out=0; t_seed_overflow=1; return 0; }   /* a jump table: left for the draw (see trans_cb_read) */
+static void sq_push(const SeedTr* t){
+  while(__atomic_load_n(&g_sq_w,__ATOMIC_RELAXED)-__atomic_load_n(&g_sq_r,__ATOMIC_ACQUIRE)>=SQN) plat_sleep_ns(2000000);
+  u32 w=__atomic_load_n(&g_sq_w,__ATOMIC_RELAXED); g_sq[w%SQN]=*t; __atomic_store_n(&g_sq_w,w+1,__ATOMIC_RELEASE); }
+static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-translate"); plat_thread_low_priority();
+  while(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE)) plat_sleep_ns(200000000);
+  g_seed_ok=calloc(g_seed_n+1,1); if(!g_seed_ok) return;
+  { /* done before, with this seed and this translator: its results are in the translated cache already */
+    FILE* d=fopen(SEED_TR_PATH,"rb"); char mg[8]; u64 sig=0; u32 n=0;
+    if(d && fread(mg,1,8,d)==8 && !memcmp(mg,"SWRSTR03",8) && fread(&sig,8,1,d)==1 && sig==g_seed_sig && fread(&n,4,1,d)==1 && n==g_seed_n && fread(g_seed_ok,1,n,d)==n){
+      fclose(d); u32 k=0; for(u32 i=0;i<n;i++) k+=g_seed_ok[i]; __atomic_store_n(&g_seed_drained,n,__ATOMIC_RELEASE);
+      LOG("shaders: seed translated before: %u of %u programs ready to build\n",k,n); return; }
+    if(d) fclose(d); }
+  FILE* f=fopen("shader_cache/seed.bin","rb"); if(!f) return; u8* code=malloc(0x10000+64); if(!code){ fclose(f); return; }
+  u64 t0=plat_ns();
+  for(u32 i=0;i<g_seed_n;i++){ SeedEnt* e=&g_seed[i];
+    if(_fseeki64(f,(long long)e->off,SEEK_SET) || fread(code,1,e->len,f)!=e->len) break; memset(code+e->len,0,64);
+    int stage=e->stage; u32 vtm=0; int nv=1;
+    for(int v=0;v<nv;v++){
+      ShaderInfo si; memset(&si,0,sizeof si); u32 key2=0;
+      if(v && stage==ST_FS){ si.tex_int_mask=vtm; key2= vtm*0x9E3779B1u ^ 0x5A5A0000u; } else if(v){ si.attr_int_mask=vtm; key2=vtm; }
+      u64 tk=translated_key(e->h,stage,key2,&si);
+      t_seed_overflow=0; t_seed_ndep=0; g_shader_cb_read=seed_no_cb; char* src=shader_to_glsl(code,e->len+64,stage,&si); g_shader_cb_read=NULL;
+      if(!src || si.unsupported || t_seed_overflow){ free(src); g_seed_tr_skip++; break; }
+      src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src);
+      if(!v && stage==ST_FS && !getenv("SWR_NO_PREBUILD_INTTEX")){ int nt=si.ntex<32? si.ntex : 32;
+        for(int k=0;k<nt;k++){ ShTex* st=&si.tex[k]; if(st->type==1 && st->fetch_only && !st->shadow) vtm|=1u<<k; } if(vtm) nv=2; }
+      if(!v && stage==ST_VS && !getenv("SWR_NO_PREBUILD_INTTEX") && (vtm=vs_guess_int_attrs(src))) nv=2;
+      static SeedTr t; t.tk=tk; t.stage=stage; t.idx=i; t.si=si; t.src=src; t.ndep=t_seed_ndep; memcpy(t.dep,t_seed_dep,t_seed_ndep*sizeof(TransDep));
+      sq_push(&t); g_seed_tr_n++; if(!v) g_seed_ok[i]=1; }
+    static SeedTr m; memset(&m,0,sizeof m); m.idx=i+1; sq_push(&m);
+    if(!((i+1)%5000)) LOG("shaders: seed translated %u of %u (%u left for the game: they read its data), %.0f s\n",i+1,g_seed_n,g_seed_tr_skip,(plat_ns()-t0)/1e9); }
+  LOG("shaders: seed translated: %u stages from %u programs (%u left for the game) in %.0f s, on its own thread\n",g_seed_tr_n,g_seed_n,g_seed_tr_skip,(plat_ns()-t0)/1e9);
+  free(code); fclose(f);
+  /* written once the GL thread has filed every result (the translated cache is appended there) */
+  while(__atomic_load_n(&g_seed_drained,__ATOMIC_ACQUIRE)<g_seed_n) plat_sleep_ns(100000000);
+  FILE* d=fopen(SEED_TR_PATH,"wb"); if(d){ fwrite("SWRSTR03",1,8,d);   /* 03: after the reverted jump-table try (02), redone without those */ fwrite(&g_seed_sig,8,1,d); fwrite(&g_seed_n,4,1,d); fwrite(g_seed_ok,1,g_seed_n,d); fclose(d); } }
+/* GL thread: file what the translator finished in the translated cache (it is then found like any other translation) */
+static void seed_drain(void){
+  for(int n=0;n<128;n++){ u32 r=__atomic_load_n(&g_sq_r,__ATOMIC_RELAXED); if(r==__atomic_load_n(&g_sq_w,__ATOMIC_ACQUIRE)) break;
+    SeedTr* t=&g_sq[r%SQN];
+    if(!t->src) g_seed_drained=t->idx;
+    else { g_tr_nostate=1; Translated* had=translated_get(t->tk); g_tr_nostate=0;
+      if(!had){ trans_ndep=t->ndep; memcpy(trans_dep,t->dep,t->ndep*sizeof(TransDep)); trans_overflow=0; translated_save(t->tk,&t->si,t->src); } free(t->src); }
+    __atomic_store_n(&g_sq_r,r+1,__ATOMIC_RELEASE); } }
+/* the next seed program for the pre-build queue (GL thread), when the game's own are all taken */
+static int seed_feed(void){
+  if(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE) || g_seed_next>=g_seed_n || g_seed_next>=g_seed_drained) return 0;   /* only translated ones */
+  SeedEnt* e=NULL;
+  while(g_seed_next<g_seed_n && g_seed_next<g_seed_drained){ SeedEnt* q=&g_seed[g_seed_next]; int ok= g_seed_ok && g_seed_ok[g_seed_next]; g_seed_next++;
+    if(ok && !mp_seen(q->h,q->stage)){ e=q; break; } }   /* skipped: not translatable ahead, or the game had it already */
+  if(!e) return 0;
+  u8* c=malloc(e->len+64); if(!c) return 0; memset(c+e->len,0,64);
+  if(_fseeki64(g_seed_f,(long long)e->off,SEEK_SET) || fread(c,1,e->len,g_seed_f)!=e->len){ free(c); return 0; }
+  pm_lock(&g_mp_m); if(g_mp_n==g_mp_cap){ g_mp_cap= g_mp_cap? g_mp_cap*2 : 1024; g_mp=realloc(g_mp,g_mp_cap*sizeof *g_mp); }
+  g_mp[g_mp_n++]=(MemProg){c,e->len+64,e->stage,e->h,0 /* t 0: from the seed, not for the boot list */}; pm_unlock(&g_mp_m);
+  if(g_seed_next==g_seed_n) LOG("shaders: every program of the seed has been taken by the pre-build (%u)\n",g_seed_n);
+  return 1; }
 static void mem_prebuild_step(void){
   /* NVIDIA on Windows: through the shader helper process, whose compiles can't block the game (shader_helper.inc). In the
      game's own driver (SWR_NV_PREBUILD=1, tried on by default 2026-11-07): glCreateProgram took 50-117 ms on the GL thread
@@ -4599,9 +4777,13 @@ static void mem_prebuild_step(void){
   if(g_mp_on<0 && g_nv_win && g_par>0 && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
   ld_drain();
   if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && (g_worker==1 || (g_nv_win && g_par>0 && (g_helper>0 || getenv("SWR_NV_PREBUILD")))) && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
-    if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0; }
+    if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0;
+      else if(!getenv("SWR_NO_SEED")){ u8 z[128]; memset(z,0,sizeof z); shader_program_check(z,sizeof z,NULL,NULL);   /* the decoder's tables, made here before another thread uses them */
+        plat_thread(seed_thread,NULL,512*1024); plat_thread(seed_tr_thread,NULL,4u<<20); } }   /* every shader of the game files, translated and built ahead (SWR_NO_SEED=1: off).
+         2026-11-12, 4060 Ti / i7-8700: 60 FPS while it works, frames over 20 ms 12.5% -> 5-10%, draws waiting for a shader 472 -> 173 on the second start */
     LOG("shaders: pre-build from GPU memory %s\n",g_mp_on? "on (shaders are built as soon as the game loads them, before it draws with them)" : "off"); }
   if(!g_mp_on) return;
+  seed_drain();
   /* finished compiles: keep the program ready for the game's first draw */
   for(int k=0;k<g_mpj_n;){ int st=__atomic_load_n(&g_mpj[k].j->state,__ATOMIC_ACQUIRE); if(!st){ k++; continue; }
     WJob* j=g_mpj[k].j; if(j->drv) pcj_drop(j);
@@ -4618,6 +4800,8 @@ static void mem_prebuild_step(void){
   int pb_go= g_helper>0? (plat_ns()-g_video_last_ns>2000000000ull && pb_n<(u32)pb_cpf) : (pb_ok && pb_n<(u32)pb_cpf && g_frame-g_cpf_frame>=2);   /* helper: any time but during a video (translating is the only cost here) */
   while(g_mpj_n<63 && plat_ns()-t0<1500000ull && (g_worker==1 || pb_go) && g_pcj_n<64){
     if(g_worker!=1 && pb_n>=(u32)pb_cpf) break;   /* NVIDIA: only when the draws started none this frame or the last */   /* at most 1.5 ms of translating per loop (a slot kept for a variant) */
+    pm_lock(&g_mp_m); int empty= g_mp_next>=g_mp_n; pm_unlock(&g_mp_m);
+    if(empty && !seed_feed()) break;   /* the game's own new shaders first, then the seed's */
     pm_lock(&g_mp_m); MemProg mp= g_mp_next<g_mp_n? g_mp[g_mp_next++] : (MemProg){NULL,0,0}; pm_unlock(&g_mp_m);
     if(!mp.code) break;
     int stage=mp.stage; u32 hl; u64 h=shader_hash(mp.code,mp.avail,&hl);
@@ -4632,10 +4816,10 @@ static void mem_prebuild_step(void){
     ShaderInfo si; memset(&si,0,sizeof si); u32 key2=0;
     if(v && stage==ST_FS){ si.tex_int_mask=vtm; key2= vtm*0x9E3779B1u ^ 0x5A5A0000u; } else if(v){ si.attr_int_mask=vtm; key2=vtm; }
     g_sh_bind= stage==ST_VS? 0 : 4;
-    u64 tk=translated_key(h,stage,key2,&si); Translated* c=translated_get(tk); char* src=NULL;
+    u64 tk=translated_key(h,stage,key2,&si); Translated* c=translated_get(tk); char* src=NULL; g_pb_noread=0;
     if(c){ si=c->si; src=malloc(strlen(c->src)+1); strcpy(src,c->src); if(!v) mp_seen_put(h,stage,1); }
     else { trans_ndep=0; trans_overflow=0; g_shader_cb_read=pb_no_cb; src=shader_to_glsl(mp.code,mp.avail,stage,&si); g_shader_cb_read=sh_cb_read;
-      if(!v) mp_seen_put(h,stage,trans_overflow? 3 : 1);
+      if(!v) mp_seen_put(h,stage,(trans_overflow||g_pb_noread)? 3 : 1);
       if(!src || si.unsupported){ /* why, by the first instruction the translator lacks: logged with the summary */
         static char why[16][24]; static u32 nwhy[16]; const char* w= !src? "no GLSL" : si.first_unsupported; char op[24]; snprintf(op,sizeof op,"%.*s",(int)strcspn(w," "),w);
         int k=0; for(;k<16 && why[k][0] && strcmp(why[k],op);k++); if(k<16){ if(!why[k][0]) snprintf(why[k],24,"%s",op); nwhy[k]++; }
@@ -4649,11 +4833,11 @@ static void mem_prebuild_step(void){
     { static int dp=-1; if(dp<0) dp=getenv("SWR_DUMP_PREBUILD")!=NULL; if(dp && stage==ST_VS){ char fp[200]; plat_mkdir("captures"); plat_mkdir("captures/pb"); snprintf(fp,sizeof fp,"captures/pb/%016llx_vs.glsl",(unsigned long long)h); FILE* f=fopen(fp,"w"); if(f){ fputs(src,f); fclose(f); } } }
     if(stage==ST_VS) src=dlg_vs_xfb(src);
     Sh tmp; memset(&tmp,0,sizeof tmp); tmp.stage=stage; tmp.hash=h; tmp.src=src; u64 key=sh_key(&tmp);
-    pack_add_sh(key,&tmp);
-    { static int tsi=-1; if(tsi<0) tsi=getenv("SWR_TEST_STANDIN")!=NULL; if((!c && trans_overflow) || tsi) fb_put(h,stage,key2,key); }
+    if(mp.t) pack_add_sh(key,&tmp);   /* the boot list: what the game loaded, not the whole seed (that loads when the game loads it, ld_request) */
+    { static int tsi=-1; if(tsi<0) tsi=getenv("SWR_TEST_STANDIN")!=NULL; if(g_pb_noread || (!c && trans_overflow) || tsi) fb_put(h,stage,key2,key); }   /* translated without its jump table: the stand-in for the exact one */
     char bp[200]; snprintf(bp,sizeof bp,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
     if(g_worker!=1 && g_helper>0){ /* the helper process builds it, low priority; its first draw then finds the binary on disk */
-      if(backend_file_exists(bp)){ g_mp_had++; if(!warm_stage_peek(key)) ld_request(key); }   /* ready before its first draw, off the GL thread */
+      if(backend_file_exists(bp)){ g_mp_had++; if(mp.t && !warm_stage_peek(key)) ld_request(key); }   /* ready before its first draw, off the GL thread (a seed one: when the game loads it) */
       else if(backend_shader_helper_alive() && hp_job_worth(src)){ u32 sl=(u32)strlen(src), gt= stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER; u8* b=malloc((size_t)sl+20);
         if(b){ memcpy(b,"SWRJ",4); memcpy(b+4,&gt,4); memcpy(b+8,&sl,4); memcpy(b+12,src,sl); memcpy(b+12+sl,"SWRJOBOK",8);
           char jp[200]; snprintf(jp,sizeof jp,"shader_cache/jobs/%016llx.pjob",(unsigned long long)key); aw_write(jp,b,(size_t)sl+20,0); free(b); pb_n++; g_hp_pre++; } }
@@ -4795,6 +4979,14 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     if(g_vtc) LOG("gpu: GL_NV_texture_compression_vtc: S3TC 3D textures are reordered into its 4x4x4 blocks\n");
     if(!g_gles) LOG("ASTC textures: %s\n",g_has_astc && !getenv("SWR_ASTC_CPU")? "decoded by the GPU (fast, with mipmaps)" : "decoded on the CPU");
     int had_par=g_par; if(getenv("SWR_SYNC_SHADERS")) g_par=0;
+    { /* AMD (RX 9070 XT, driver 26.10.2, report of 2026-11-12): the crash at start is on a thread of the driver's own,
+         0.3 s after the first shaders are built, with its parallel compile asked for on as many threads as it likes.
+         Our compile threads were already off there (backend_win32.c); now the driver's are too: every shader is built on
+         the GL thread. shader_threads=2 or more in the ini brings both back */
+      extern int g_opt_shader_threads; const char* ven=(const char*)glGetString(GL_VENDOR);
+      if(!g_gles && ven && (strstr(ven,"ATI") || strstr(ven,"AMD")) && g_opt_shader_threads==0 && g_par){
+        typedef void (APIENTRY*MSCT)(GLuint); MSCT f=(MSCT)backend_gl_proc("glMaxShaderCompilerThreadsKHR"); if(!f) f=(MSCT)backend_gl_proc("glMaxShaderCompilerThreadsARB");
+        if(f) f(0); g_par=0; LOG("shaders: AMD OpenGL driver: its own compile threads are off too (shader_threads=2 or more to have them)\n"); } }
     /* NVIDIA on Windows (driver 617, RTX 4060 Ti, MEASURED 2026-11-03): glMaxShaderCompilerThreads from any context left
        SwapBuffers blocked for good after the third frame, and our compile threads (shared contexts) got stuck in
        glGetProgramiv(GL_LINK_STATUS) after a job or two, so their jobs never finished (with draws not waiting: nothing
@@ -4931,7 +5123,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
       case WK_PRESENT_ADDR: if(!present_addr(w.addr,w.w,w.h)){ extern void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
           u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; pc_step(); job_grave_step(); dlg_frame(); aj_drain(); gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_SYNC: pm_lock(&g_ql);__atomic_store_n(w.done,1,__ATOMIC_RELEASE);pc_broadcast(&g_frame_consumed_cv);pm_unlock(&g_ql);break;
-      case WK_DUMP: dump_rts(); g_tr_arm=1; break;
+      case WK_DUMP: if(!getenv("SWR_TEST_NODUMP")) dump_rts(); g_tr_arm=1; break;   /* test only: the trace without the target pictures */
       case WK_SHOT: do_screenshot(w.path[0]? w.path : NULL); __atomic_store_n(&g_shot_done,w.n,__ATOMIC_SEQ_CST); break;
     }
     u64 finished=plat_ns();g_gpu_busy+=finished-t_busy0;

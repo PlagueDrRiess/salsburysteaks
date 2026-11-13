@@ -574,6 +574,7 @@ static void page_display() {
     bool fs = getb("fullscreen");
     if (draw_opt("fullscreen")) backend_fe_fullscreen(getb("fullscreen") ? 1 : 0); (void)fs;
     section("PICTURE SHAPE"); draw_opt("aspect", get("aspect") != "16:9" ? "ON TRIAL" : nullptr);
+    section("FIELD OF VIEW"); draw_opt("fov");
     section("LANGUAGE"); draw_opt("language");
 }
 
@@ -597,10 +598,9 @@ static void page_graphics() {
 }
 
 static void page_gameplay() {
-    page_title("GAMEPLAY", "Frame rate, fast forward, camera and cheats.");
+    page_title("GAMEPLAY", "Frame rate, fast forward and cheats.");
     section("FRAME RATE"); draw_opt("fps_limit"); draw_opt("forced_vsync"); draw_opt("show_fps");
     section("RIDES"); draw_opt("fast_forward"); if (getb("fast_forward")) draw_opt("fast_forward_speed");
-    section("CAMERA"); draw_opt("fov");
     section("CHEATS"); draw_opt("cheats"); draw_opt("green_energy_10x");
     section("CHEATS: AMMO"); for (const char* k : {"cheat_missiles", "cheat_super_shot", "cheat_large_shot", "cheat_power_bombs", "cheat_ammo", "cheat_elemental_ammo", "cheat_arm_cannon", "cheat_crystals"}) draw_opt(k);
     section("CHEATS: SAMUS"); for (const char* k : {"cheat_health", "cheat_jumps", "cheat_speed", "cheat_walls", "cheat_flare_timer"}) draw_opt(k);
@@ -1040,6 +1040,7 @@ extern "C" int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l
         g_quit = true; *result = 0; return 1;
     case WM_TIMER: if (w == 77) { pads_rumble_off(); KillTimer((HWND)h, 77); } *result = 0; return 1;
     case WM_ERASEBKGND: *result = 1; return 1;
+    case WM_SETCURSOR: if (LOWORD(l) == HTCLIENT) { SetCursor(nullptr); *result = TRUE; return 1; } break;   // the reticle stands in for it (visor_cursor)
     case WM_SYSCOMMAND: if ((w & 0xfff0) == SC_KEYMENU) { *result = 0; return 1; } break;
     }
     return 0;
@@ -1077,6 +1078,7 @@ extern "C" int fe_run(void* hwnd) {
         handle_nav();
         frame();
         nav_move(g_nav.down ? 1 : g_nav.up ? -1 : 0);
+        visor_cursor(ImGui::GetTime());   // the F1 menu's reticle (the Windows arrow is hidden over the window: WM_SETCURSOR)
         ImGui::Render();
         const float clear[4] = {0.015f, 0.027f, 0.05f, 1};
         g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr); g_ctx->ClearRenderTargetView(g_rtv, clear);

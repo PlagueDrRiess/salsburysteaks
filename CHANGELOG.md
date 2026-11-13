@@ -4,14 +4,58 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
-## 2026.11.20
+## 2026.11.20 (test release)
 
-### AMD Radeon: a second attempt at the crash at start (OpenGL and Vulkan output)
-2026.11.19 did not cure it: a new report shows the same crash in AMD's driver on plain OpenGL. In every log it comes
-a moment after the first shader programs loaded on the background compile threads are used. AMD cards now load and
-build every shader on the one OpenGL thread, as NVIDIA cards already do, which is what `shader_threads=-1` did by
-hand. This is not confirmed yet: no AMD card is available to the project, so please report whether the game now
-starts. If it does not, **Native Vulkan** (Graphics > Renderer) starts on AMD cards and is the renderer to try.
+### Every shader of the game, built ahead (like the Tears of the Kingdom recomp)
+The game keeps its shaders in its own archives. The first start now reads all 67,430 of them out of your game files
+(about 13 seconds, in the background) into `shader_cache\seed.bin`, translates the ones that can be done ahead on a
+spare CPU core (about 2 minutes, once), and builds them in the background while you play. Later starts reuse all of
+it. On the test PC the game held 60 FPS while this ran, and draws that had to wait for a new shader dropped from
+about 470 to 170 on the second start. Shaders that use jump tables are still built when first drawn; that is next.
+Set `SWR_NO_SEED=1` to turn it off if it causes trouble, and please report it.
+
+### Field of view that works
+- The **Field of view** setting (now under **Display**) widens the game's camera itself.
+- The visor, HUD, minimap and the red hit overlay keep their size and place at any field of view.
+- Things at the edges of a wide view are no longer hidden (grey sky at the sides of the tram tunnel at 160%), and the
+  game sees a little past the edges so it can load what is about to come into view.
+- Known: at very wide settings some distant objects (far doors) can still disappear early. Being worked on.
+
+### Textures appear sharp straight away
+AMD and NVIDIA desktop cards cannot read the game's compressed textures (ASTC). They were decoded on the CPU in the
+background, which could take up to 1.4 s after a texture was on screen. They are now decoded on the graphics card
+the moment they load. (`SWR_ASTC_CPU=1` returns to the old way.)
+
+### AMD Radeon: a third attempt at the crash at start (OpenGL and Vulkan output)
+The crash is inside AMD's own OpenGL driver, on a shader-compile thread the driver starts by itself. AMD cards now
+build every shader on the one OpenGL thread, with neither our compile threads nor the driver's (`shader_threads=2`
+or more in the ini brings them back). Not confirmed yet: no AMD card is available to the project, so please report
+whether the game now starts.
+
+### Sound when no audio device was ready at start
+If the sound device was not ready when the game first played audio (a headset or Bluetooth speaker still
+connecting), the whole run was silent. The game now tries again every 2 seconds, and reconnects if the device goes
+away while playing.
+
+### Mouse look (issue 10)
+Mouse movement is no longer lost between frames, the view stops where the mouse stops (no overshoot), sensitivity
+goes up to 1000%, and the **Motion** mode is in the launcher and the in-game menu.
+
+### Menus
+- The in-game menu (F1) has a visor reticle as its pointer, and the launcher uses it too.
+- The in-game menu writes to the log why it closed, to track down a report of it closing by itself.
+
+### Known issues in this test release
+- **AMD Radeon crash at start** (issues 11, 1): the third fix is in, but untested on AMD hardware. Reports welcome.
+- **Native Vulkan** (issues 1, 13): the view can turn white in some areas, scan marks may not show (which can block
+  progress after the first cutscene), a glitch in the first seconds of the map-upload cutscene, and FPS drops. Play
+  on OpenGL or Vulkan output for now; Native Vulkan gets its own work session.
+- **Field of view above about 120%**: some distant objects (far doors) disappear earlier than they should, because
+  the game decides their detail from their size on screen. Being traced.
+- **Shader stutter on first visits**: shaders that use jump tables (about half) are still built when first drawn.
+- **Ultrawide** (issue 9): the world widens, but the HUD and menus are stretched.
+- **Save station on load**: its base can show black for a moment, then light up.
+- **Frame pacing**: in heavy scenes frames can alternate fast and slow while averaging 60 FPS.
 
 ### Native Vulkan: F8 and F5 captures
 F8 and F5 now work on Native Vulkan too: the next frame is written to `captures\vk\NNN` with a line for every draw

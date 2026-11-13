@@ -18,14 +18,51 @@ OLD_FOV = (' SETSB(1,1056964608);\n SETS(0,c->v[0].f[0]*c->v[1].f[0]);\n'
            ' c->x[30]=134547556; F_9393E00(c,154746368);')
 NEW_FOV = (' SETSB(1,1056964608);\n if(c->rt->fov_scale) c->v[1].f[0]*=c->rt->fov_scale(c,c->x[30]);\n'
            ' SETS(0,c->v[0].f[0]*c->v[1].f[0]);\n c->x[30]=134547556; F_9393E00(c,154746368);')
+# The visibility frustums (main+0x52E78 and +0xEAA10) take the same angle and halve it the same way before tan(); left
+# alone, a wider picture shows objects the game already culled, which pop in at the edges. Bit 63 of the address tells
+# fov_scale it is a frustum: it widens those whose angle is the camera's.
+FRUSTUM_HOOK = ' if(c->rt->fov_scale) c->v[1].f[0]*=c->rt->fov_scale(c,c->x[30]|(1ull<<63));\n'
+# main+0xB87644 is the one the world is culled with (an inlined copy, twice a frame): found with the probes below, by
+# the draw count at the save station at 160% (243 draws without it, 253 with it).
+OLD_FRUSTUM = (' SETS(0,c->v[0].f[0]*c->v[1].f[0]);\n c->x[30]=134581940; F_9393E00(c,154746368);',
+               ' SETS(0,c->v[0].f[0]*c->v[1].f[0]);\n c->x[30]=135211604; F_9393E00(c,154746368);',
+               ' SETS(0,c->v[0].f[0]*c->v[1].f[0]);\n c->x[30]=146331204; F_9393E00(c,154746368);')
+
+# Every other tan() of a product (an angle times a factor, often a half): a hook with its own return address and bit
+# 62. The runtime widens those whose angle is the camera's (the frustum's rule): the level's sections are culled with
+# copies of the projection made here, and left alone they showed grey sky at the sides of the tram tunnel at 160%
+# (F8 2026-11-12 15:56:52; all widened, 16:01:35: walls to the edges). SWR_FOV_SITES=none or a list of offsets for tests.
+import os as _os, re as _re
+_TAN_SITE = _re.compile(r'(SETS\(0,c->v\[\d+\]\.f\[0\]\*c->v\[\d+\]\.f\[0\]\);\n c->x\[30\]=(\d+);)( F_9393E00\(c,154746368\);)')
+_TAN_DONE = {'134547556', '134581940', '135211604', '146331204'}
+TAN_PROBE = ' if(c->rt->fov_scale) c->v[0].f[0]*=c->rt->fov_scale(c,c->x[30]|(1ull<<62));'
+
+# cos() and sin() of a product (F_9393DF0, F_9393E30: the libm imports beside tan, by their use): view cones are
+# tested with these (the texture and model streamer, by the pop-in at the edges at 160%). Bits 62 and 61: the runtime
+# leaves them alone unless asked (SWR_FOV_TRIG), until the ones that matter are known.
+_TRIG_SITE = _re.compile(r'(SETS\(0,c->v\[\d+\]\.f\[0\]\*c->v\[\d+\]\.f\[0\]\);\n c->x\[30\]=(\d+);)( F_9393(?:DF0\(c,154746352\)|E30\(c,154746416\));)')
+TRIG_PROBE = ' if(c->rt->fov_scale) c->v[0].f[0]*=c->rt->fov_scale(c,c->x[30]|(3ull<<61));'
+
+def _probe_tan(text):
+    text = _TAN_SITE.sub(lambda m: m.group(0) if m.group(2) in _TAN_DONE else m.group(1) + TAN_PROBE + m.group(3), text)
+    return _TRIG_SITE.sub(lambda m: m.group(1) + TRIG_PROBE + m.group(3), text)
 
 def apply(text, mods, say):
     main = next((m for m in mods if m.name == 'main'), None)
-    if main is not None and main.base == 0x8006000 and main.build_id.rstrip(b'\0') == MAIN_ID_110 and OLD_FOV in text:
-        if text.count(OLD_FOV) != 1:
-            raise ValueError('Metroid projection source changed; review the field of view hook before rebuilding')
-        text = text.replace(OLD_FOV, NEW_FOV)
-        say('  applied the field of view hook (v1.1.0)')
+    if main is not None and main.base == 0x8006000 and main.build_id.rstrip(b'\0') == MAIN_ID_110:
+        # the text comes a chunk at a time: each hook is applied in the chunk that holds it
+        if OLD_FOV in text:
+            if text.count(OLD_FOV) != 1:
+                raise ValueError('Metroid projection source changed; review the field of view hook before rebuilding')
+            text = text.replace(OLD_FOV, NEW_FOV)
+            say('  applied the field of view hook (v1.1.0)')
+        for old in OLD_FRUSTUM:
+            if old in text:
+                if text.count(old) != 1:
+                    raise ValueError('Metroid frustum source changed; review the field of view hook before rebuilding')
+                text = text.replace(old, FRUSTUM_HOOK + old)
+                say('  applied the field of view hook to a visibility frustum (v1.1.0)')
+        text = _probe_tan(text)
     sdk = next((m for m in mods if m.name == 'sdk'), None)
     if (main is None or sdk is None or main.base != 0x8005000 or sdk.base != 0x7b0c6000
         or main.build_id.rstrip(b'\0') != MAIN_ID or sdk.build_id.rstrip(b'\0') != SDK_ID):

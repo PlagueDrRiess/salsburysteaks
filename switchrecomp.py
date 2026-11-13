@@ -283,6 +283,8 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if gles: extra += ['overlay']
     srcs = [os.path.join(RT, s + '.c') for s in RUNTIME_SRC + extra] + [os.path.join(RT, 'backend_%s.c' % backend), os.path.join(RT, 'entry.c')]
     if gles or gl: srcs += [os.path.join(RT, 'bcn', 'bcn.cpp'), os.path.join(RT, 'bcn', 'bcdec.cpp')]
+    # zstd's single-file decoder (third_party/zstd, BSD): the game files' shader banks are zstd inside zstd (gpu_gl.c)
+    if gl: srcs += [os.path.join(HERE, 'third_party', 'zstd', 'zstddeclib.c')]
     # LSFG (uses the user's Lossless.dll), desktop GL only
     spvc = None
     # SWR_RELEASE=1 (the public Metroid Prime 4 Beyond release): no frame generation, and the renderer without DLSS

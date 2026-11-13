@@ -317,7 +317,7 @@ static void attr_write(Ctx* c, u32 addr, const char* val){
 }
 
 /* ============================================================ textures */
-static u8 g_bl2; static u32 g_bl2_bank, g_bl2_off;   /* second handle read for split handles, set by track_handle */
+static __thread u8 g_bl2; static __thread u32 g_bl2_bank, g_bl2_off;   /* second handle read for split handles, set by track_handle (per thread: the seed is translated on its own thread, gpu_gl.c) */
 static int tex_slot2(Ctx* c, u32 cbuf_off_words, int type, int array, int shadow, int fetch, int bl, u32 bank);
 
 static int tex_slot(Ctx* c, u32 cbuf_off_words, int type, int array, int shadow, int fetch){ return tex_slot2(c,cbuf_off_words,type,array,shadow,fetch,0,0); }
@@ -368,7 +368,7 @@ static int track_handle(Ctx* c, u32 idx, u32 rb, u32* bank, u32* off){
   if(n==2){ g_bl2=1; g_bl2_bank=bk[1]; g_bl2_off=of[1]/4; }
   return 1; }
 
-static int g_cur_tex=-1;   /* the slot of the sample being written (channel masks) */
+static __thread int g_cur_tex=-1;   /* the slot of the sample being written (channel masks) */
 static void tex_cmask(Ctx* c, u32 m){ if(g_cur_tex>=0 && g_cur_tex<c->si->ntex) c->si->tex[g_cur_tex].cmask|=(u8)m; }
 static const char* IW(Ctx* c, int s, const char* smp){ g_cur_tex=s;
   if(s<0 || s>=32 || !((c->si->tex_int_mask>>s)&1)) return smp;
@@ -1159,7 +1159,7 @@ static void mark_tgt(Ctx* c, u32 i){ mark(c,i); if(i<65536) c->tgt[i>>3]|=1<<(i&
 
 static int is_tgt(Ctx* c, u32 i){ return i<65536 && (c->tgt[i>>3]>>(i&7))&1; }
 
-int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
+__thread int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);   /* per thread: the GL thread's draws and the seed's translator thread */
 
 u64 shader_hash(const u8* code, u32 max_bytes, u32* out_len){
   if(!ops_ready) ops_init();
@@ -1211,6 +1211,10 @@ static int brx_targets(const u64* w, u32 i, u32 n, u32* out, int max){
   for(u32 k=1;k<i && i-k>=11;k++){ u32 j=i-k; if(!IDX_OK(j)) continue; const Op* o2=decode(w[j]); if(k>8 && (!o2 || is_term(o2->id) || (o2->id==O_LDC && B(w[j],16,3)!=7 && B(w[j],0,8)==ra) || (o2->id!=O_LDC && B(w[j],0,8)==ra))) return -1;
     if(!o2 || o2->id!=O_LDC || B(w[j],0,8)!=ra) continue;
     u32 cidx=B(w[j],36,5); i32 coff=(i32)(B(w[j],20,16)<<16)>>16; int cnt=0, seen=0;
+    { /* test only: SWR_TRACE_BRX=N logs the first N jump tables read (where they come from, their first words) */
+      static int left=-1; if(left<0){ const char* e=getenv("SWR_TRACE_BRX"); left= e? atoi(e) : 0; }
+      u32 v0=0; if(left>0 && g_shader_cb_read(cidx,(u32)coff,&v0)){ left--; u32 v[8]={0}; for(int q=0;q<8;q++) g_shader_cb_read(cidx,(u32)(coff+q*4),&v[q]);
+        extern void logf_(int,const char*,...); logf_(1,"brx: table in c%u at +%d (imm %d): %08x %08x %08x %08x %08x %08x %08x %08x\n",cidx,coff,imm,v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7]); } }
     for(u32 e=0;e<64 && cnt<max;e++){ u32 v; if(!g_shader_cb_read(cidx,(u32)(coff+(i32)e*4),&v)) break;
       i32 bb=(i32)v+imm; if(bb<0 || (bb&7)) break; u32 t=i+1+(u32)(bb/8); if(t>=10 && ((t-10)&3)==0) t++;
       if(t<11) break; seen++; if(t>=n) continue; out[cnt++]=t; }

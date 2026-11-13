@@ -43,7 +43,7 @@ typedef struct {
 } ShaderInfo;
 /* malloc'd GLSL, or NULL */
 char* shader_to_glsl(const u8* code, u32 max_bytes, int stage, ShaderInfo* si);
-extern int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
+extern __thread int (*g_shader_cb_read)(u32 idx, u32 off, u32* out);
 u64 shader_hash(const u8* code, u32 max_bytes, u32* out_len);
 /* global buffer (SSBO) binding of buffer i of a draw stage (slot 0 vertex, 1 pixel, 2 geometry): the first 8 keep
    the original layout, buffers 8-15 sit above all of those (binding 24+), when the driver has 48 bindings and 16 per

@@ -18,6 +18,7 @@ extern Fonts g_fonts;
 void load_fonts(ImGuiIO& io);
 void apply_style(float scale);
 float S(float px);            // px at 1080p -> current scale
+void visor_cursor(double t);  // the menus' pointer (F1 menu and launcher), drawn over everything
 extern float g_scale;
 
 // ---------------------------------------------------------------- controller navigation (both UIs)

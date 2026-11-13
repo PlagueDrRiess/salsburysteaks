@@ -59,6 +59,8 @@ typedef struct RtAPI {
   void (*sev)(void);
   void (*wfe)(struct CPU* c);
   float (*fov_scale)(struct CPU* c, u64 lr);   /* a projection's half field of view times this (metroid_perf.py) */
+  volatile u64* watch;                          /* test builds (SWR_WATCH_READS): [lo, hi) of guest memory whose readers are reported */
+  void (*watch_hit)(struct CPU* c, u64 a, const char* fn);
 } RtAPI;
 
 typedef struct CPU {
@@ -83,8 +85,14 @@ typedef struct CPU {
 #define MP(a)    (M + (u64)(a))
 #define RD8(a)   (*(u8*)MP(a))
 #define RD16(a)  (*(u16*)MP(a))
+#ifdef SWR_WATCH_READS   /* a test build of the game code: which functions read a watched range (the camera's projection) */
+#define SWR_WCHK(a) ((u64)(a)-c->rt->watch[0]<c->rt->watch[1]-c->rt->watch[0]? (c->rt->watch_hit(c,(u64)(a),__func__),(u64)(a)) : (u64)(a))
+#define RD32(a)  (*(u32*)MP(SWR_WCHK(a)))
+#define RD64(a)  (*(u64*)MP(SWR_WCHK(a)))
+#else
 #define RD32(a)  (*(u32*)MP(a))
 #define RD64(a)  (*(u64*)MP(a))
+#endif
 #define RDS8(a)  (*(i8*)MP(a))
 #define RDS16(a) (*(i16*)MP(a))
 #define RDS32(a) (*(i32*)MP(a))

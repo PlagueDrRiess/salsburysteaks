@@ -132,13 +132,19 @@ static void aoutput(const i16*pcm){
   static int trace_checked;static FILE*trace;static u64 previous_ns;
   if(!trace_checked){trace_checked=1;const char*path=getenv("SWR_TEST_AUDIO_STATS");if(path&&*path){trace=fopen(path,"w");if(trace)fprintf(trace,"ns,guest_frame,dt_ms,writes,drops,queued,clipped,silent,potential_empty\n");}}
   AcquireSRWLockExclusive(&lock);
-  if(!attempted){attempted=1;if(!getenv("SWR_MUTE_AUDIO")){
+  /* The output is opened when the first sound comes, and again every 2 s while it can't be: with no sound device at
+     that moment (a headset or Bluetooth speaker not connected yet, a receiver still waking) one failed try used to
+     leave the whole run silent. The default device first, then each device in turn */
+  static u64 next_try;static u32 failures;
+  if(!device&&!attempted&&plat_ns()>=next_try){if(getenv("SWR_MUTE_AUDIO"))attempted=1;else{
     WAVEFORMATEX format={0};format.wFormatTag=WAVE_FORMAT_PCM;format.nChannels=2;format.nSamplesPerSec=48000;format.wBitsPerSample=16;format.nBlockAlign=4;format.nAvgBytesPerSec=192000;
-    MMRESULT result=waveOutOpen(&device,WAVE_MAPPER,&format,0,0,CALLBACK_NULL);
-    if(result!=MMSYSERR_NOERROR){device=NULL;WARN("audio: waveOutOpen failed (%u)\n",result);}
-    else{for(int k=0;k<NB;k++){headers[k].lpData=(LPSTR)samples[k];headers[k].dwBufferLength=sizeof samples[k];waveOutPrepareHeader(device,&headers[k],sizeof(WAVEHDR));}
+    MMRESULT result=waveOutOpen(&device,WAVE_MAPPER,&format,0,0,CALLBACK_NULL);UINT used=WAVE_MAPPER,ndev=waveOutGetNumDevs();
+    for(UINT id=0;result!=MMSYSERR_NOERROR&&id<ndev;id++){result=waveOutOpen(&device,id,&format,0,0,CALLBACK_NULL);used=id;}
+    if(result!=MMSYSERR_NOERROR){device=NULL;next_try=plat_ns()+2000000000ull;
+      if(failures++%30==0)WARN("audio: no sound device could be opened (waveOutOpen %u, %u devices): trying again every 2 seconds\n",result,ndev);}
+    else{for(int k=0;k<NB;k++){headers[k].lpData=(LPSTR)samples[k];headers[k].dwBufferLength=sizeof samples[k];headers[k].dwFlags=0;waveOutPrepareHeader(device,&headers[k],sizeof(WAVEHDR));busy[k]=0;}
       waveOutPause(device);paused=1;   /* it starts once PRIME chunks are queued (below) */
-      LOG("audio: Windows output opened, stereo PCM16 at 48000 Hz, about 40 ms buffered before it plays\n");}}}
+      LOG("audio: Windows output opened (%s), stereo PCM16 at 48000 Hz, about 40 ms buffered before it plays%s\n",used==WAVE_MAPPER?"the default device":"a device other than the default",failures?" (after failed tries)":"");}}}
   if(device){int slot=-1,queued=0;for(int k=0;k<NB;k++){if(busy[k]&&(headers[k].dwFlags&WHDR_DONE))busy[k]=0;if(!busy[k]&&slot<0)slot=k;if(busy[k])queued++;}
     int potential_empty=queued==0&&writes>0;
     /* The mixer hands over ~3 chunks (5 ms each) every 16.7 ms. Played straight away, only one to three chunks were ever
@@ -146,8 +152,10 @@ static void aoutput(const i16*pcm){
        until PRIME chunks (40 ms) are queued, and if it runs dry it pauses and builds that cushion again */
     enum {PRIME=8};
     if(potential_empty&&!paused){underruns++;waveOutPause(device);paused=1;}
-    if(slot>=0){memcpy(samples[slot],pcm,sizeof samples[slot]);MMRESULT result=waveOutWrite(device,&headers[slot],sizeof(WAVEHDR));if(result==MMSYSERR_NOERROR){busy[slot]=1;writes++;queued++;}else WARN("audio: waveOutWrite failed (%u)\n",result);}else dropped++;
-    if(paused&&queued>=PRIME){waveOutRestart(device);paused=0;}
+    if(slot>=0){memcpy(samples[slot],pcm,sizeof samples[slot]);MMRESULT result=waveOutWrite(device,&headers[slot],sizeof(WAVEHDR));if(result==MMSYSERR_NOERROR){busy[slot]=1;writes++;queued++;}else{WARN("audio: waveOutWrite failed (%u)\n",result);
+        if(result==MMSYSERR_NODRIVER||result==MMSYSERR_BADDEVICEID||result==MMSYSERR_INVALHANDLE){   /* the device went away: open one again */
+          waveOutReset(device);for(int k=0;k<NB;k++)waveOutUnprepareHeader(device,&headers[k],sizeof(WAVEHDR));waveOutClose(device);device=NULL;next_try=plat_ns()+2000000000ull;}}}else dropped++;
+    if(device&&paused&&queued>=PRIME){waveOutRestart(device);paused=0;}
     if(trace){u64 now=plat_ns();u32 clipped=0,silent=0;for(u32 n=0;n<AF*2;n++){if(pcm[n]==32767||pcm[n]==-32768)clipped++;if(pcm[n]==0)silent++;}
       fprintf(trace,"%llu,%d,%.6f,%llu,%llu,%d,%u,%u,%d\n",(unsigned long long)now,g_frames,previous_ns?(now-previous_ns)/1e6:0,(unsigned long long)writes,(unsigned long long)dropped,queued,clipped,silent,potential_empty);previous_ns=now;if(writes%200==0)fflush(trace);}
     if(writes&&writes%2000==0)LOG("audio: %llu chunks queued, %llu overflow drops, %llu underruns (the output ran dry and rebuffered)\n",(unsigned long long)writes,(unsigned long long)dropped,(unsigned long long)underruns);

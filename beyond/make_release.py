@@ -49,6 +49,7 @@ LICENSES = [
     ('runtime/imgui/LICENSE.txt', 'DearImGui-MIT.txt'), ('runtime/vp9/LICENSE-libvpx.txt', 'libvpx-BSD.txt'),
     ('runtime/oh264/LICENSE', 'OpenH264-BSD.txt'), ('runtime/bcn/LICENSE_texture2ddecoder.txt', 'texture2ddecoder.txt'),
     ('python/LICENSE_PYTHON.txt', 'Python-PSF.txt'),
+    ('third_party/zstd/LICENSE', 'zstd-BSD.txt'),   # the shader seed reads the game files' zstd shader banks
 ]
 ZLIB_TXT = """zlib (zlib1.dll) and SDL2 (SDL2.dll) are under the zlib licence:
 
@@ -91,7 +92,7 @@ and 8BitDo over USB or Bluetooth. Keyboard: arrows = D-pad, WASD = stick, X/Z/C/
 Source: a Windows build of linuxopt/mp4-recomp (https://github.com/linuxopt/mp4-recomp, commit 31ff5d5), which forks
 Metroid Dread Recomp by yozander2009-stack and contributors; the game work is theirs. Windows port by PlagueDrRiess
 (https://github.com/PlagueDrRiess/salsburysteaks) with Claude Opus 5.5 by Anthropic as AI pair programmer.
-Credits: SwitchRecomp by MZ Labs (recompiler and runtime); ScarletNX (native Vulkan renderer); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Dear ImGui; SDL2; zlib; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
+Credits: SwitchRecomp by MZ Labs (recompiler and runtime); ScarletNX (native Vulkan renderer); Krydar, Nova77, xSeRosiSx (button-icon mods, downloaded on request; art: Xelu's FREE Controller Prompts); program icon: Metroid icon created by Smashicons - Flaticon (https://www.flaticon.com/free-icons/metroid); Dear ImGui; SDL2; zlib; zstd; libvpx; OpenH264; GCC / MinGW-w64; Python. Licences are in the licenses folder; the EXE is
 GPL-3.0 (it contains the ScarletNX renderer) and its source is published with this release.
 Metroid Prime 4 Beyond is (c) Nintendo. This project is not affiliated with or endorsed by Nintendo.
 """
@@ -256,6 +257,8 @@ def source(out):
     for f in ('imgui.cpp', 'imgui_draw.cpp', 'imgui_tables.cpp', 'imgui_widgets.cpp', 'imgui.h', 'imconfig.h', 'imgui_internal.h',
               'imstb_rectpack.h', 'imstb_textedit.h', 'imstb_truetype.h', 'LICENSE.txt'):
         cp(os.path.join(im, f), os.path.join(out, 'third_party', 'imgui-1.92.5', f))
+    for f in ('zstddeclib.c', 'zstd.h', 'zstd_errors.h', 'LICENSE'):   # zstd 1.5.6's single-file decoder (BSD)
+        cp(os.path.join(ROOT, 'third_party', 'zstd', f), os.path.join(out, 'third_party', 'zstd', f))
     for f in ('imgui_impl_win32', 'imgui_impl_opengl3', 'imgui_impl_dx11'):
         for ext in ('.cpp', '.h'):
             cp(os.path.join(im, 'backends', f + ext), os.path.join(out, 'third_party', 'imgui-1.92.5', 'backends', f + ext))
