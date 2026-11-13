@@ -417,9 +417,15 @@ static SvcObj* new_ns(void){ return svcobj_new("ns",ns_disp,0); }
 static KEvent* g_aud_ev;
 static void aout_tick(void);
 
-/* renderer event fires every 5ms (240 samples @ 48k) like HOS */
+/* renderer event fires every 5ms (240 samples @ 48k) like HOS.
+   A/V hold: the game moves one step per image, but its sound follows this clock, so each hitch left the picture
+   further behind the sound for the rest of a cutscene (issue 8: "video lags behind the audio more and more"). After
+   a hitch the renderer's ticks are held back for as long as the hitch lasted (main.c av_hitch): the sound waits while
+   the images catch up. SWR_NO_AV_HOLD=1: off */
+volatile long long g_av_hold_ns;
 static void audio_clock(void* arg){ plat_diag_role("audio-clock"); (void)arg; u64 next=plat_ns();
   for(;;){ next+=5000000ull; u64 now=plat_ns(); if(next>now) plat_sleep_ns((i64)(next-now)); else if(now-next>50000000ull) next=now;
+    if(__atomic_load_n(&g_av_hold_ns,__ATOMIC_RELAXED)>0){ __atomic_sub_fetch(&g_av_hold_ns,5000000ll,__ATOMIC_RELAXED); continue; }
     kevent_signal(g_aud_ev);
     aout_tick(); } }
 

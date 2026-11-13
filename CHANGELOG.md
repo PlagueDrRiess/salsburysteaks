@@ -4,6 +4,21 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.21 (fix for 2026.11.20)
+
+### Setup stopped at "Applying Metroid Prime 4 Beyond fixes"
+2026.11.20's new field-of-view and shader hooks change the generated game code, and setup's check of that code
+(before it applies the Metroid fixes) still expected the old code, so it stopped with "The generated code does not
+match the verified RS15 build (code_110.c)". Deleting the build folder did not help. The check now expects the new
+code: update, and setup goes on from where it stopped.
+
+### Cutscenes: no more cream-coloured shapes or ghost images, and the sound stays with the picture (issue 8)
+- A frame where some objects could not be drawn yet (their shaders still building) is no longer shown: the last whole
+  picture stays up for a moment instead. Those frames showed Samus and the marines as flat cream shapes and left
+  ghost images piling up. `SWR_NO_FRAME_HOLD=1` shows them as before.
+- After a hitch the sound now waits for the picture to catch up, instead of staying ahead for the rest of the
+  cutscene. `SWR_NO_AV_HOLD=1` turns this off.
+
 ## 2026.11.20 (test release)
 
 ### Every shader of the game, built ahead (like the Tears of the Kingdom recomp)

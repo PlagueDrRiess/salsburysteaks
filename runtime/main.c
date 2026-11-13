@@ -640,6 +640,13 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   { static int once; if(!once){ once=1; if(getenv("SWR_VT")) vt_set(1); } }   /* test smooth clock w/o recording */
   if(limiter_trace)trace_enqueued=plat_ns();
   g_frames++; vt_frame();
+  { /* A/V hold (svc_core.c audio_clock): a hitch of 40-400 ms puts the images that much behind the sound; the sound's
+       clock is held back by the same amount so the images catch up. Longer gaps are loads, which the game times itself */
+    static int on=-1; static u64 last; if(on<0) on=!getenv("SWR_NO_AV_HOLD"); u64 now=plat_ns();
+    if(on && last && !g_vt_on){ u64 dt=now-last; if(dt>40000000ull && dt<400000000ull){   /* over 40 ms: a hitch, not a slower PC's steady pace */ extern volatile long long g_av_hold_ns;
+        long long h=__atomic_add_fetch(&g_av_hold_ns,(long long)(dt-16666667ull),__ATOMIC_RELAXED); if(h>1000000000ll) __atomic_store_n(&g_av_hold_ns,1000000000ll,__ATOMIC_RELAXED);
+        static u64 tot, n, lt; tot+=dt-16666667ull; n++; if(now-lt>10000000000ull){ lt=now; LOG("a/v hold: %llu hitches so far, the sound waited %.0f ms in all for the images to catch up\n",(unsigned long long)n,tot/1e6); } } }
+    last=now; }
   { /* SWR_VIDEO_TIMING=1: how evenly frames reach the screen, every 120 presents: average, worst and late (> 20 ms) */
     static int timing=-1; static u64 last, sum, mx; static u32 n, late; if(timing<0) timing=!getenv("SWR_NO_VIDEO_TIMING");
     if(timing){ u64 now=plat_ns(); if(last){ u64 dt=now-last; sum+=dt; if(dt>mx) mx=dt; if(dt>20000000ull) late++; n++;

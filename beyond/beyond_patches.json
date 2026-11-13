@@ -147,8 +147,8 @@
    ]
   },
   "code_110.c": {
-   "pristine": "7486d89f7cbf34913e8453a5bc92110b9025ffe607ceb734efa0224b0c480ab2",
-   "result": "04fdd70d44258b8b713880be68dc151fce3a049512f506a25d26cef3d2362444",
+   "pristine": "6afb037ff7d9620331ebf80e2aadf86535e6ef9b5b25b292c2ca8592c4862d6a",
+   "result": "7e04754423d001aceabd28dcfb63a11d4399c53e2d6d4935524de77b5b03193f",
    "hunks": [
     [
      8699,
@@ -226,8 +226,8 @@
    ]
   },
   "code_158.c": {
-   "pristine": "7fdbc18a6c5c09f1e6839ed0abec820368c3e2b2d2bcc4e13bbc3b0d0994d113",
-   "result": "4829f95d96a7051da6eb4d74f69e1926715400df8750b4a44df7d102c4313eff",
+   "pristine": "d0547f80dd85fd721aac8cf4ca819f8eb8d60c80792f2e51a49e2ccb050cb32b",
+   "result": "71cc3eed480cd51edb6453571f7912847cb53913bb671fa805d0927420df108d",
    "hunks": [
     [
      11543,

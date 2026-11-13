@@ -1487,6 +1487,7 @@ static u64 sh_key(Sh* s){ return src_key(s)*0x9E3779B97F4A7C15ull ^ 0x5E9A0000ul
 static int g_par=-1;
 static int g_lf_light, g_lf_run, g_lf_reveal; static u64 g_lf_wait_ns;   /* load-screen detector (frame_stats) */
 static u64 st_lf_waits, st_lf_wait_ns;   /* draws that waited for shaders on light frames, and how long */
+static u64 st_dw_waits, st_dw_ns;   /* draws in play that waited for their shaders instead of being skipped */
 /* opt-in (SWR_LOAD_WAIT=1): a draw count can't tell a loading screen from the map or a menu, which also draw little */
 volatile unsigned g_sh_loops_structured;   /* shader.c: loops emitted as do/while */
 /* shader helper process (backend_win32.c shader_helper.inc), NVIDIA on Windows */
@@ -3549,6 +3550,19 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     if(g_lf_wait_ns<budget){ u64 t0=plat_ns(); g_must_wait=1;
       while((!sh_sep_ready(vs) || !sh_sep_ready(fs)) && plat_ns()-t0<budget-g_lf_wait_ns) plat_sleep_ns(500000);
       g_must_wait=0; u64 dt=plat_ns()-t0; g_lf_wait_ns+=dt; st_lf_waits++; st_lf_wait_ns+=dt; } }
+  { /* While playing too: a draw whose shader is still building waits for it, up to 10 ms of waiting per frame, instead
+       of being skipped. Skipped, an object's depth pass drew but its material pass didn't, and lighting made it a flat
+       cream shape (Samus and the marines in the opening cutscene, issue 8), and the skipped draws left the previous
+       frame's pixels on screen, piling up as ghost images. A wait is a hitch instead, which the A/V hold keeps in sync.
+       SWR_DRAW_WAIT_MS=0: skip as before */
+    static int budget_ms=-1; if(budget_ms<0){ const char* e=getenv("SWR_DRAW_WAIT_MS"); budget_ms= e? atoi(e) : 0; }   /* off: on NVIDIA a waiting draw compiles its shader right there (g_must_wait), a stall per shader */   /* 200 made a cold start a slideshow (77 s of waits in 200 s): a short wait for an almost-built shader, the frame hold (present_addr) for the rest */
+    static u64 dw_ns; static u32 dw_frame;
+    if(!must_wait && g_sep>0 && budget_ms>0 && ((vs->sps!=2 && vs->sps!=3) || (fs->sps!=2 && fs->sps!=3))){
+      if(dw_frame!=g_frame){ dw_frame=g_frame; dw_ns=0; }
+      u64 budget=(u64)budget_ms*1000000ull;
+      if(dw_ns<budget){ u64 t0=plat_ns(); g_must_wait=1;
+        while((!sh_sep_ready(vs) || !sh_sep_ready(fs)) && plat_ns()-t0<budget-dw_ns) plat_sleep_ns(500000);
+        g_must_wait=0; u64 dt=plat_ns()-t0; dw_ns+=dt; st_dw_waits++; st_dw_ns+=dt; } } }
   if(must_wait && g_sep>0){ u64 t0=plat_ns(); g_must_wait=1; while((!sh_sep_ready(vs) || !sh_sep_ready(fs)) && plat_ns()-t0<3000000000ull) plat_sleep_ns(500000); g_must_wait=0; st_waited++;
     { u64 dt=plat_ns()-t0; static int said; if(dt>100000000ull && said<200){ said++; LOG("shaders: a draw that must have its shaders waited %.0f ms (vs %016llx fs %016llx)\n",dt/1e6,(unsigned long long)vs->hash,(unsigned long long)fs->hash); } } }
   if(g_sep>0){ int rv, rf; TM(TM_SHREADY,(rv=sh_sep_ready(vs), rf=sh_sep_ready(fs)));
@@ -4253,6 +4267,16 @@ static int present_addr(u64 cpu_addr, int w, int h){
   Tex* best=NULL;
   for(int k=0;k<TEXH;k++) for(Tex* t=texh[k];t;t=t->next) if(t->is_rt && gmmu_translate(t->gva)==cpu_addr){ if(!best || (t->w==(u32)w && t->h==(u32)h) || t->last_used>best->last_used) best=t; }
   trace_note("PRESENT %llx %dx%d -> %s %llx\n",(unsigned long long)cpu_addr,w,h,best?"rt":"(none, CPU)",(unsigned long long)(best?best->gva:0));
+  { /* A frame that had draws skipped because their shaders were still building is not shown: the last whole picture
+       stays up (at most 30 frames in a row) while the game runs on. Shown, it had objects drawn without their material
+       (flat cream shapes) and old pixels where draws were missing (ghost images piling up), issue 8. The game keeps its
+       pace, so the picture and the sound stay together. SWR_NO_FRAME_HOLD=1: show them as before */
+    static int on=-1; static u64 mark; static int held; static u64 st_held, st_shown; if(on<0) on=!getenv("SWR_NO_FRAME_HOLD");
+    u64 sk=st_compiling-mark; mark=st_compiling;
+    if(on && best && sk && held<30 && g_last_present_tex){ held++; st_held++;
+      static u64 lt; u64 now=plat_ns(); if(now-lt>10000000000ull){ lt=now; LOG("shaders: %llu frames with draws still building were held back (the last whole picture stayed up)\n",(unsigned long long)st_held); }
+      best->last_used=g_frame; return 1; }
+    held=0; st_shown++; }
   if(best){ best->last_used=g_frame; g_blit_rt=1; blit_to_screen(best->id,1,(int)best->w,(int)best->h); g_blit_rt=0; g_last_is_rt=1; st_pres_rt++; return 1; }
   st_pres_cpu++;
   static int said; if(said<3){ said++;
@@ -5059,6 +5083,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
             if(g_hp_built||g_hp_fallback){ static u32 said; if(g_hp_built+g_hp_fallback!=said){ said=g_hp_built+g_hp_fallback; LOG("shaders: %u built by the helper process when first drawn (longest wait %.0f ms), %u compiled in the game instead\n",g_hp_built,g_hp_max/1e6,g_hp_fallback); } }
             if(g_hp_pre){ static u32 said; if(g_hp_pre!=said){ said=g_hp_pre; LOG("shaders: %u sent to the helper process ahead of their first draw\n",g_hp_pre); } }
             { extern volatile unsigned g_sh_loops_structured; static unsigned said; if(g_sh_loops_structured!=said){ said=g_sh_loops_structured; LOG("shaders: %u shaders with loops translated as plain loops (no jump dispatcher)\n",said); } }
+            if(st_dw_waits){ static u64 said; if(st_dw_waits!=said){ said=st_dw_waits; LOG("shaders: %llu draws in play waited for their shaders instead of being skipped (%.0f ms in all)\n",(unsigned long long)st_dw_waits,st_dw_ns/1e6); } }
             if(st_lf_waits){ static u64 said; if(st_lf_waits!=said){ said=st_lf_waits; LOG("shaders: %llu draws on loading/fade frames waited for their shaders instead of being skipped (%.0f ms in all)\n",(unsigned long long)st_lf_waits,st_lf_wait_ns/1e6); } }
             if(g_workers_up){ char wb[160]; int o=0; for(int i=0;i<g_wid_next && i<8;i++) o+=snprintf(wb+o,sizeof wb-o," #%d step %d jobs %u",i,g_wph[i],g_wjobs[i]);
               LOG("shaders: compile threads:%s\n",wb); } }
