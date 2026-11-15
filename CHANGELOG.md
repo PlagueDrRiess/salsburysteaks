@@ -4,6 +4,43 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.22
+
+### Ultrawide works (issue 17)
+21:9 and 32:9 showed the 16:9 picture stretched: the game's aspect ratio sits in read-only memory and the write was
+refused. It is now patched directly, and the picture really is wider. If it can't be, the log says so.
+
+### The arm cannon looks like the game's again
+The default view is back: the cannon with its upper-arm armor, and Samus's left hand at the bottom. The enlarged arm
+from earlier builds put the barrel out of line with the aim; it is now off by default (`arm_cannon_large=1` under
+`[Display]` turns it back on).
+
+### Smoother play and faster loading
+- The game no longer loads every saved shader at start-up, which slowed the first minutes: frames over 20 ms dropped
+  from 20.6% to 11.7% in the same test.
+- The shader cache is compacted: it loads in about 7 seconds instead of 35, and takes 1.3 GB instead of 6.9.
+- Shaders that use jump tables are now built ahead too, like the rest.
+- The game's GPU timer runs smoothly, so its dynamic resolution stays at its sharpest size more often.
+- If you set `wait_for_shaders=1` in the ini, set it back to `0`: with it on, every new shader is built while the game
+  waits, which shows as freezes of up to 2 seconds each.
+
+### Field of view
+- New **Edge look-ahead** setting under **Display** (`fov_lookahead`, default 40%): the game keeps the parts of the
+  level just past the screen edges, so no white or empty areas appear at the sides at wide settings.
+- The arm, aim and lock-on keep matching the picture at any field of view.
+
+### Controls
+- Keyboard and mouse can be rebound in the menu.
+- Mouse **Pointer** mode: looking up and down follows the mouse the right way, the mouse button fires, and turning is
+  finer.
+- Escape no longer closes the menu right after opening it.
+
+### Other
+- AMD cards decode the game's textures on the CPU, to avoid a crash in the AMD driver (issue 16). Please report if it
+  still happens.
+- The last three play sessions' logs are kept (`.lastplay.log`, `.lastplay2.log`, `.lastplay3.log`).
+- The Dread button-icon pack download is removed.
+
 ## 2026.11.21 (fix for 2026.11.20)
 
 ### Setup stopped at "Applying Metroid Prime 4 Beyond fixes"
