@@ -1,5 +1,7 @@
 # Metroid Prime 4 Recomp — native Windows build
 
+[![Listed on Decomp Buddy](https://decompbuddy.com/badge.svg)](https://decompbuddy.com/games/metroid-prime-4-beyond-metroid-prime-4-recomp-nintendo-switch)
+
 A native PC build of **your own copy** of *Metroid Prime 4: Beyond* for Windows. It is built on the SwitchRecomp runtime
 by MZ Labs: the game's Switch code is recompiled ahead of time into a native Windows DLL on your PC, and the Switch GPU's
 work is translated to OpenGL.

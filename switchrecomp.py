@@ -282,6 +282,9 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     gles = backend in ('x11es', 'android')
     if gles: extra += ['overlay']
     srcs = [os.path.join(RT, s + '.c') for s in RUNTIME_SRC + extra] + [os.path.join(RT, 'backend_%s.c' % backend), os.path.join(RT, 'entry.c')]
+    # developer tools: runtime/local (not in the repository) when present, else the stand-in that leaves them off
+    dk_local = os.path.isfile(os.path.join(RT, 'local', 'devkit.c')) and not os.environ.get('SWR_PUBLIC')   # build.bat release: never
+    srcs += [os.path.join(RT, 'local', 'devkit.c') if dk_local else os.path.join(RT, 'devkit_stub.c')]
     if gles or gl: srcs += [os.path.join(RT, 'bcn', 'bcn.cpp'), os.path.join(RT, 'bcn', 'bcdec.cpp')]
     # zstd's single-file decoder (third_party/zstd, BSD): the game files' shader banks are zstd inside zstd (gpu_gl.c)
     if gl: srcs += [os.path.join(HERE, 'third_party', 'zstd', 'zstddeclib.c')]
@@ -314,7 +317,7 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     # Metroid Prime 4 Beyond front end + in-game menu (Dear ImGui, runtime/beyond_ui); prebuilt by work-profiler/build_imgui.py
     imgui = os.path.join(RT, 'imgui', 'libimgui.a')
     frontend = os.path.isfile(imgui) and target_win and backend == 'win32' and not os.environ.get('SWR_NO_FRONTEND')
-    if frontend: srcs += [os.path.join(RT, 'beyond_ui', f) for f in ('ui.cpp', 'fe.cpp', 'fe_sys.cpp', 'fe_steam.cpp', 'fe_update.cpp', 'ov.cpp')]
+    if frontend: srcs += [os.path.join(RT, 'beyond_ui', f) for f in ('ui.cpp', 'fe.cpp', 'fe_sys.cpp', 'fe_steam.cpp', 'fe_update.cpp', 'ov.cpp')] + ([os.path.join(RT, 'local', 'dk_page.cpp')] if dk_local else [])
     # Linux (X11): the in-game menu from ImGui's sources (runtime/imgui/src, copied there by build_imgui.py), no Play screen
     overlay = not frontend and backend == 'x11' and os.path.isfile(os.path.join(RT, 'imgui', 'src', 'imgui.cpp')) and not os.environ.get('SWR_NO_FRONTEND')
     # and the Play screen / setup in its own X11 window (fe.cpp + fe_sys_linux.cpp); SWR_NO_LINUX_FRONTEND=1 leaves it out

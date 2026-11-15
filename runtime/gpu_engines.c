@@ -102,6 +102,12 @@ volatile u64 g_gpu_sub_ns;
 u64 gpu_ticks(void){
   extern int g_opt_drs; extern u64 guest_ns(void); static u64 last;
   u64 n= g_opt_drs? guest_ns() : (g_gpu_sub_ns? g_gpu_sub_ns : guest_ns());
+  { /* timestamps creep 16 ns a call and only catch up with the clock once a second. With the submit time alone, a
+       measurement that began in one frame and ended in the next read a whole frame of GPU time, and the game's own
+       resolution scaling kept changing the world's size (1392-1440 wide of 1600, nearly every frame); held, it stays at
+       1440x808 (2026-11-14, also fewer slow frames: no render targets resized each frame). SWR_GPU_TICK_NOHOLD=1: off */
+    static int hold=-1; if(hold<0) hold=getenv("SWR_GPU_TICK_NOHOLD")==NULL;
+    if(hold && !g_opt_drs && last){ u64 now=guest_ns(); n= now-last>1000000000ull? now : last+16; } }
   if(n<=last) n=last+16; last=n;   /* monotonic, nudged by 1ns within a frame */
   return n*384/625; }
 

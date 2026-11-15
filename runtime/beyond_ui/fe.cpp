@@ -79,6 +79,25 @@ static std::string get(const char* k) { const Opt* o = find_option(k); return g_
 static void set(const char* k, const std::string& v) { const Opt* o = find_option(k); g_ini.set(o ? o->section : "Launcher", k, v); g_ini_dirty = true; }
 static bool getb(const char* k) { return get(k) == "1"; }
 
+#ifdef _WIN32
+// keyboard and mouse bindings (Controls): the bind_ lines of [Input]. An older .ini's mouse_buttons shows in them as the
+// game will read it, and the first change writes them all out and sets it back to its default, so it isn't applied again
+static std::string bind_get(int i) {
+    std::string v = g_ini.get(bind_input_key(i), bind_default(i)); char o[64];
+    if (bind_mouse_buttons(i, g_ini.get("mouse_buttons", "").c_str(), v.c_str(), o, sizeof o)) v = o;
+    return v;
+}
+static void bind_set(int i, const std::string& v) {
+    char o[64];
+    if (bind_mouse_buttons(i, g_ini.get("mouse_buttons", "").c_str(), "", o, sizeof o)) {
+        for (int j = 0; j < bind_count(); j++) if (j != i) g_ini.set("Input", bind_input_key(j), bind_get(j));
+        g_ini.set("Input", "mouse_buttons", "zr,zl,r,-,-");
+    }
+    g_ini.set("Input", bind_input_key(i), v); g_ini_dirty = true;
+}
+static BindUi g_bindui = {bind_get, bind_set};
+#endif
+
 static bool draw_opt(const char* key, const char* tag = nullptr) {
     const Opt* o = find_option(key); if (!o) return false;
     std::string cur = get(key); bool ch = false;
@@ -574,7 +593,7 @@ static void page_display() {
     bool fs = getb("fullscreen");
     if (draw_opt("fullscreen")) backend_fe_fullscreen(getb("fullscreen") ? 1 : 0); (void)fs;
     section("PICTURE SHAPE"); draw_opt("aspect", get("aspect") != "16:9" ? "ON TRIAL" : nullptr);
-    section("FIELD OF VIEW"); draw_opt("fov");
+    section("FIELD OF VIEW"); draw_opt("fov"); draw_opt("fov_lookahead");
     section("LANGUAGE"); draw_opt("language");
 }
 
@@ -604,7 +623,7 @@ static void page_gameplay() {
     section("CHEATS"); draw_opt("cheats"); draw_opt("green_energy_10x");
     section("CHEATS: AMMO"); for (const char* k : {"cheat_missiles", "cheat_super_shot", "cheat_large_shot", "cheat_power_bombs", "cheat_ammo", "cheat_elemental_ammo", "cheat_arm_cannon", "cheat_crystals"}) draw_opt(k);
     section("CHEATS: SAMUS"); for (const char* k : {"cheat_health", "cheat_jumps", "cheat_speed", "cheat_walls", "cheat_flare_timer"}) draw_opt(k);
-    section("CHEATS: COMBAT"); for (const char* k : {"cheat_one_hit", "cheat_two_hit", "cheat_ally_health", "cheat_ally_dying"}) draw_opt(k);
+    section("CHEATS: COMBAT"); for (const char* k : {"cheat_one_hit", "cheat_two_hit", "cheat_ally_dying"}) draw_opt(k);   // cheat_ally_health retired (issue 14)
 }
 
 static void page_audio() {
@@ -634,18 +653,8 @@ static void page_controls() {
     section("CONTROLLER SUPPORT");
     row_text("SDL2", pads_sdl_loaded() ? "Found on this system" : "Not found: install SDL2 (libSDL2-2.0.so.0) for controllers", pads_sdl_loaded() ? C_OK : C_WARN);
 #endif
-    section("BUTTON ICONS");
-    draw_opt("button_icons");
-    for (int i = 0; i < 3; i++) {
-        const IconPack& k = ICON_PACKS[i];
-        bool have = icon_pack_installed(i);
-        if (have) row_text(fmt("%s icons", k.label).c_str(), fmt("Installed  (by %s)", k.author).c_str(), C_OK);
-        else if (row_button(fmt("##ip%d", i).c_str(), fmt("%s icons: not installed  (by %s, from GameBanana)", k.label, k.author).c_str(), "GET")) {
-            flash("Downloading..."); std::string err;
-            if (icon_pack_get(i, &err)) flash(fmt("%s icons installed", k.label)); else flash(err);
-        }
-    }
-    help_text("Icon packs are community mods from gamebanana.com, downloaded only when you press GET. Applies at the next game start.");
+    /* No button-icon choice for now: the GameBanana packs offered here were Metroid Dread mods (Dread's .bctex files, a
+       folder Prime 4 doesn't have), so they downloaded and changed nothing. Prime 4 draws its prompts from font glyphs */
     section("PLAYER 1");
     int cur = atoi(get("controller_index").c_str());
     auto pads = pads_list(); int k = 0;
@@ -704,7 +713,12 @@ static void page_controls() {
               else { memcpy(g_nav.bind, b, sizeof b); flash("Two actions share a button: pick a different one (not saved until each action has its own)"); } }
     if (row_button("##nr", "Reset menu buttons", "RESET")) { for (int i = 0; i < NAV_COUNT; i++) g_nav.bind[i] = NAV_DEFAULT[i]; set("launcher_bindings", bindings_to_string(g_nav.bind)); flash("Menu buttons reset"); }
     help_text("Locked out? Hold + and - together for 3 seconds on any screen, or use the keyboard (arrows, Enter, Esc) or the mouse.");
+#ifdef _WIN32
+    section("KEYBOARD AND MOUSE"); g_bindui.ff = getb("fast_forward"); bind_rows(g_bindui);
+    section("KEYBOARD (DEFAULT KEYS)");
+#else
     section("KEYBOARD (BUILT IN)");
+#endif
     const char* kb[][2] = {{"Move", "W A S D"}, {"Look", "Mouse (or I J K L)"}, {"Shoot / charge", "Left mouse button"}, {"Lock on", "Right mouse button"},
                            {"Subweapon", "Middle mouse button or F"}, {"Lasso", "G (keep holding to yank up), or R then W / mouse up"}, {"Jump / dodge (locked on)", "Space"}, {"Interact", "E"}, {"Morph Ball", "Left Ctrl or C"}, {"Switch visors", "Q"},
                            {"Morph Ball: bomb / power bomb", "Left click / F"}, {"Morph Ball: boost (hold, release)", "Space"}, {"Morph Ball: spring / spider (hold)", "Q / right click"},
@@ -724,7 +738,7 @@ static void page_mods() {
     for (int i = 0; i < (int)g_mods.size(); i++) {
         Mod& m = g_mods[i]; bool en = m.enabled;
         bool icons = false; for (int k = 0; k < 3; k++) if (m.name == ICON_PACKS[k].name) icons = true;
-        if (icons) { row_text(m.name.c_str(), "Button icons: chosen under Controls", C_DIM); continue; }
+        if (icons) { row_text(m.name.c_str(), "A Metroid Dread mod: does nothing in this game (not applied)", C_DIM); continue; }
         std::string label = fmt("%s   (%d files, %.1f MB)", m.name.c_str(), m.files, m.bytes / 1048576.0);
         if (row_bool(fmt("##mod%d", i).c_str(), label.c_str(), &en)) { m.enabled = en; ch = true; }
         if (ImGui::IsItemFocused()) g_mod_sel = i;
@@ -789,8 +803,6 @@ static void page_about() {
         {"Claude (Anthropic)", "AI pair programmer: runtime fixes and performance work, this front end and in-game menu, setup, the Linux build, testing and documentation."},
         {"SwitchRecomp by MZ Labs", "The static recompiler and runtime this build is made from (Apache-2.0). \"SwitchRecomp by MZ Labs\" credit and NOTICE kept."},
         {"ScarletNX contributors", "Native Vulkan renderer: GPU front end, Maxwell to SPIR-V shader translation (GPL-3.0)."},
-        {"Krydar, Nova77, xSeRosiSx", "Button-icon mods: Switch to XBOX Layout (Krydar), Switch to PS4 Layout (Nova77), Switch to PS5 Layout (xSeRosiSx), downloaded from gamebanana.com when you choose them."},
-        {"Xelu's FREE Controller Prompts", "The PlayStation button art in those icon mods."},
         {"Smashicons - Flaticon", "The program icon: Metroid icon created by Smashicons, flaticon.com/free-icons/metroid (Flaticon licence)."},
         {"Dear ImGui by Omar Cornut", "This interface (MIT)."},
         {"SDL2 (Sam Lantinga and contributors)", "Controller support (zlib licence)."},
@@ -892,6 +904,11 @@ static void handle_nav() {
     if (g_test && test_input()) g_pad.name = g_pad.name.empty() ? "Test pad" : g_pad.name;
     if (g_nav.reset_hold(now, phys)) { set("launcher_bindings", bindings_to_string(g_nav.bind)); set("launcher_nav", "1"); flash("Menu buttons reset to the defaults"); }
     g_nav.update(phys, fg ? g_pad.lx : 0, fg ? g_pad.ly : 0, now);
+#ifdef _WIN32
+    if (g_bindui.cap >= 0 && g_page != PG_CONTROLS) bind_cancel(g_bindui);
+    if (g_bindui.cap >= 0 && (g_nav.up || g_nav.down || g_nav.left || g_nav.right || std::any_of(g_nav.act, g_nav.act + NAV_COUNT, [](bool a) { return a; }))) {
+        bind_cancel(g_bindui); g_nav.up = g_nav.down = g_nav.left = g_nav.right = false; for (bool& a : g_nav.act) a = false; }   // a controller press cancels a key binding's wait
+#endif
     g_nav.feed_imgui(io);
     g_row.pad_left = g_nav.left || ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
     g_row.pad_right = g_nav.right || ImGui::IsKeyPressed(ImGuiKey_RightArrow);
@@ -1033,6 +1050,10 @@ extern "C" int fe_should_show(int argc, char** argv, const char* exedir, const c
 }
 
 extern "C" int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l, long long* result) {
+    if (g_bindui.cap >= 0 && !(m == WM_SYSKEYDOWN && w == VK_F4)) {   // a key binding waits: the next key or mouse button press goes to it (Alt+F4 still closes)
+        int code = bind_code_from_msg(m, w, l);
+        if (code) { if (code > 0) bind_take(g_bindui, code); *result = 0; return 1; }
+    }
     if (ImGui::GetCurrentContext() && ImGui_ImplWin32_WndProcHandler((HWND)h, m, (WPARAM)w, (LPARAM)l)) { *result = 1; return 1; }
     switch (m) {
     case WM_SIZE: if (w != SIZE_MINIMIZED) g_resize = true; *result = 0; return 1;

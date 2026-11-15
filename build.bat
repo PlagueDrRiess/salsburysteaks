@@ -44,7 +44,10 @@ if defined DLSS (
 echo [3/4] Runtime EXE
 set SWR_RELEASE=1
 if defined DLSS set SWR_WITH_DLSS=1
+rem a public release never takes the private developer tools in runtime\local
+if /i "%1"=="release" set SWR_PUBLIC=1
 python\python.exe switchrecomp.py --build-runtime --cc gcc || goto :fail
+set SWR_PUBLIC=
 set SWR_RELEASE=
 set SWR_WITH_DLSS=
 if /i not "%1"=="release" if not defined DLSS (

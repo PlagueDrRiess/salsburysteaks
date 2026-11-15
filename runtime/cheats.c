@@ -34,13 +34,27 @@ static const char* const nat_key[NAT_N]={"cheat_missiles","cheat_super_shot","ch
   "cheat_arm_cannon","cheat_elemental_ammo","cheat_speed","cheat_walls","cheat_flare_timer","cheat_crystals","cheat_jumps","cheat_ally_health",
   "cheat_ally_dying","cheat_one_hit","cheat_two_hit"};
 static volatile int g_nat[NAT_N];
-int cheats_nat_opt(const char* k, const char* v){ for(int i=0;i<NAT_N;i++) if(!strcmp(k,nat_key[i])){ g_nat[i]=atoi(v)!=0; return 1; } return 0; }
+int cheats_nat_opt(const char* k, const char* v){ for(int i=0;i<NAT_N;i++) if(!strcmp(k,nat_key[i])){
+    /* "Allies at full health" is retired (issue 14): its hook is the game's general getter for a clamped value (health is one
+       of many: at least five callers, for parameter blocks of all kinds), so every such value read as its maximum, and
+       enemies played their death and stood up again. Making it allies-only isn't possible at that spot */
+    if(i==13){ if(atoi(v)){ static int said; if(!said){ said=1; LOG("cheats: cheat_ally_health is retired (it kept enemies from dying): ignored\n"); } } g_nat[i]=0; return 1; }
+    g_nat[i]=atoi(v)!=0; return 1; } return 0; }
 static inline void nat_s(CPU* c, int r, f32 v){ V128* p=&c->v[r]; p->d[0]=0; p->d[1]=0; p->f[0]=v; }
 static inline u32 nat_r32(u64 a){ u32 v; memcpy(&v,GP(a),4); return v; }
 static inline void nat_w32(u64 a, u32 v){ memcpy(GP(a),&v,4); }
 /* the guest instruction before each hook has just used these addresses, so they are mapped */
 void cheats_native(CPU* c, u32 id){
   extern int g_opt_cheats;
+  { /* test only: SWR_TRACE_HEALTH=1 logs each health component the game reads (the ally-health hook's function, id 13),
+       its fields and who asked, to find what tells an ally from an enemy (issue 14) */
+    static int tr=-1; if(tr<0) tr=getenv("SWR_TRACE_HEALTH")!=NULL;
+    if(tr && id==13 && c->x[0]){ static u64 seen[64]; static int n; int k=0; for(;k<n;k++) if(seen[k]==c->x[0]) break;
+      if(k==n && n<64){ seen[n++]=c->x[0]; u32 w[16]; for(int i=0;i<16;i++) w[i]=nat_r32(c->x[0]+i*4);
+        u64 own=((u64)w[3]<<32)|w[2], ovt=0; u32 ow[8]={0}; if(own>>32 && own<0x1000000000ull){ ovt=((u64)nat_r32(own+4)<<32)|nat_r32(own); for(int i=0;i<8;i++) ow[i]=nat_r32(own+8+i*4); }
+        u64 lr2=0; { u64 fp=c->x[29]; if(fp) lr2=((u64)nat_r32(fp+12)<<32)|nat_r32(fp+8); }
+        LOG("health %llx (asked from main+%llx, its caller main+%llx): max %08x cur %08x | owner %llx type %llx: %08x %08x %08x %08x %08x %08x %08x %08x\n",(unsigned long long)c->x[0],(unsigned long long)(c->x[30]-0x8006000ull),
+          (unsigned long long)(lr2-0x8006000ull),w[6],w[7],(unsigned long long)own,(unsigned long long)ovt,ow[0],ow[1],ow[2],ow[3],ow[4],ow[5],ow[6],ow[7]); } } }
   if(id>=NAT_N || !g_nat[id] || !g_opt_cheats) return;
   { static volatile int said[NAT_N]; if(!said[id]){ said[id]=1; LOG("cheats: %s is working\n",nat_key[id]); } }
   switch(id){
@@ -156,6 +170,8 @@ static void pl_thread(void* arg){ (void)arg; plat_thread_low_priority();
 static u64 region(int m){
   if(m==4){ if(g_pl_base) return g_pl_base; g_pl_want=1; if(!g_pl_thread){ g_pl_thread=1; plat_thread(pl_thread,NULL,1<<20); } return PL_NOWHERE; }
   return m==0? g_main_base : m==1? HEAP_BASE : m==2? ALIAS_BASE : g_aslr_base; }
+/* the devkit's address expressions (devkit.c): the same bases the cheat codes use */
+u64 cheats_base(int m){ if(m<4){ lock(); ids(); unlock(); } return region(m); }
 static u64 mask(int w, u64 v){ return w>=8? v : v&((1ull<<(w*8))-1); }
 static int cmp(int c, u64 a, u64 b){ switch(c){ case 1: return a>b; case 2: return a>=b; case 3: return a<b; case 4: return a<=b; case 5: return a==b; case 6: return a!=b; } return 0; }
 static u64 arith(int op, u64 a, u64 b){ switch(op){ case 0: return a+b; case 1: return a-b; case 2: return a*b; case 3: return a<<(b&63); case 4: return a>>(b&63);
@@ -262,10 +278,12 @@ static void aspect_tick(void){
   if(want<=0) want=16.0f/9.0f;
   if(want<1.25f) want=1.25f; if(want>4.0f) want=4.0f;
   if(!have){ if(!said && g_opt_aspect!=0){ said=1; LOG("aspect: no known place for build %s: the picture stays 16:9\n",g_bid); } g_aspect_now=1; return; }
-  u64 cur=0; if(!rd(g_main_base+off,4,&cur)) return;
+  u64 cur=0; if(!rd(g_main_base+off,4,&cur)){ if(!said){ said=1; LOG("aspect: main+%llx can't be read: the picture stays 16:9\n",(unsigned long long)off); } g_aspect_now=1; return; }
   float f; u32 c32=(u32)cur; memcpy(&f,&c32,4);
   if(f<1.2f || f>4.1f){ if(!said){ said=1; LOG("aspect: the value at main+%llx is %g, not an aspect ratio: left alone\n",(unsigned long long)off,f); } g_aspect_now=1; return; }
-  if(f!=want){ u32 o32; memcpy(&o32,&want,4); wr(g_main_base+off,4,o32);
+  /* the constant is in main's read-only data: wr() refuses pages that aren't writable, so the ratio never changed and
+     21:9 showed the 16:9 picture stretched (issue 17). It is patched directly, as patching it in the game's file does */
+  if(f!=want){ u32 o32; memcpy(&o32,&want,4); memcpy(GP(g_main_base+off),&o32,4);
     /* after a change while playing the game puts its own value back every frame: logged once per change and every 10 s */
     static float lw; static u64 lt; u64 now=plat_ns(); if(want!=lw || now-lt>10000000000ull){ lw=want; lt=now; LOG("aspect: %g (was %g)\n",want,f); } }
   g_aspect_now=want/(16.0f/9.0f); }
@@ -285,6 +303,8 @@ void watch_hit(CPU* c, u64 a, const char* fn){ (void)c;
   u32 o=(u32)(a-g_watch_base); for(int i=0;i<n;i++) if(off_[i]==o && !strcmp(seen[i],fn)) return;
   if(n<400){ snprintf(seen[n],24,"%s",fn); off_[n]=o; n++; LOG("watch: %s reads camera +%u\n",fn,o); } }
 static volatile float g_fov_seen[8]; static volatile int g_fov_seen_n;   /* the camera angles widened lately */
+volatile int g_fov_bisect, g_fov_tan_n; volatile u64 g_fov_tan_site[64];   /* F9 test: tan sites left at the game's angle */
+int g_opt_fov_look=40;   /* [Display] fov_lookahead: % past the picture's edges the level's sections are kept (tan sites) */
 float fov_code_scale(CPU* c, u64 lr){
   (void)c; g_fov_code=1;
   if((lr>>62)==1){ /* another tan() in the game code (metroid_perf.py): v0 is the angle it takes the tangent of. Widened when
@@ -312,6 +332,11 @@ float fov_code_scale(CPU* c, u64 lr){
     if(!init){ init=1; const char* e=getenv("SWR_FOV_SITES"); all= !e || !*e || !strcmp(e,"all"); if(e && !strcmp(e,"none")) e=NULL;
       while(e && *e && !all && nonly<32){ char* end; only[nonly++]=strtoull(e,&end,16); e= *end==','? end+1 : NULL; } }
     int want=all; for(int j=0;j<nonly;j++) want|= only[j]==o;
+    /* F9 (testing which tan site the level of detail and size culling read, for the far doors popping out at 160%):
+       1 = every tan site keeps the game's angle, 2.. = only the site listed that many-minus-one in the log keeps it */
+    g_fov_tan_n=n; if(i<64) g_fov_tan_site[i]=o;
+    { static int bi=-1; if(bi<0){ const char* e=getenv("SWR_FOV_BISECT"); bi=0; if(e && *e){ g_fov_bisect=atoi(e); bi=1; } } }   /* test only: start at that F9 step */
+    if(g_fov_bisect==1 || (g_fov_bisect>=2 && i==g_fov_bisect-2)) return 1.0f;
     /* only the gameplay camera's angles (53-55 degrees): the minimap hologram is drawn with a 30-degree camera, and once a
        30-degree view had been widened elsewhere it matched too, shrank and moved to the middle (F8 2026-11-12 16:14:40) */
     if(all && a*114.59156f<40.0f) want=0;
@@ -321,7 +346,17 @@ float fov_code_scale(CPU* c, u64 lr){
     if(!want || g_opt_fov==100) return 1.0f;
     int hit=0; for(int j=0;j<8;j++) hit|= g_fov_seen[j]>0.0f && fabsf(g_fov_seen[j]-2.0f*a)<0.0087f;
     if(!hit) return 1.0f;
-    float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f; return k; }
+    float k=(float)g_opt_fov/100.0f; if(k<0.5f) k=0.5f; if(k>1.6f) k=1.6f;
+    /* look-ahead for the level's sections (test: SWR_FOV_TAN_MARGIN, 1.0 = none): sections past the edges were dropped
+       (white at the sides of the room by the hangar windows, F8 2026-11-13 14:05:36). Not for sites that must match the
+       picture: the lock-on aim (main+1F4B70, F9 test 11) */
+    /* 2026-11-13, same replay: 1.0 drew 300.5 draws a frame, 1.4 drew 348.6 (+16%: the sections past the edges), with no
+       slower frames. The arm and gun cursor (main+2AB514 and +2AB77C, F9 tests 2 and 3, and the rest of that function's
+       sites) and the lock-on aim must match the picture: no margin there */
+    { static float te=-1; if(te<0){ const char* e=getenv("SWR_FOV_TAN_MARGIN"); te= e? (float)atof(e) : 0.0f; }   /* test only: overrides [Display] fov_lookahead */
+      float tm= te>0.0f? te : 1.0f+(float)g_opt_fov_look/100.0f; if(tm<1.0f) tm=1.0f; if(tm>1.8f) tm=1.8f;
+      if(tm>1.0f && o!=0x1f4b70 && !(o>=0x2ab000 && o<0x2ac000)){ float km=k*tm; if(a*km>1.40f) km=1.40f/a; if(km<k) km=k; return km; } }
+    return k; }
   if((lr>>63) && getenv("SWR_FOV_NO_FRUSTUM")) return 1.0f;   /* test only: the visibility frustums keep the game's angle */
   if(lr>>63){ /* a visibility frustum (main+52E78 and +EAA10, the same parameters as a projection): widened by the same
                  factor when its angle is one the camera's projection was just widened for, so nothing at the new edges
@@ -340,13 +375,17 @@ float fov_code_scale(CPU* c, u64 lr){
   u64 o= lr-0x8006000ull;
   /* every perspective projection but the 90-degree ones (reflection probe faces, which must meet at the edges). The
      community mod's three caller ranges missed the first-person camera itself (main+131FA0 and +133694, 55 degrees) */
+  if(o==0x133694){ extern volatile u64 g_dk_camera; g_dk_camera=c->x[19]; }   /* the devkit's "camera" base */
   { static int w=-1; if(w<0) w=getenv("SWR_WATCH_CAMERA")!=NULL; if(w && o==0x133694 && !g_watch_base){ g_watch_base=c->x[19]; g_watch[0]=c->x[19]+352; g_watch[1]=c->x[19]+480; LOG("watch: camera object at %llx\n",(unsigned long long)c->x[19]); } }
   float deg=c->v[0].f[0]*57.29578f;
   int cam= deg>10.0f && deg<150.0f && fabsf(deg-90.0f)>0.5f;
   { /* test only: SWR_FOV_ONLY=hex,hex... widens only the callers at those offsets of main */
     static int init; static u64 only[16]; static int nonly;
     if(!init){ init=1; const char* e=getenv("SWR_FOV_ONLY"); while(e && *e && nonly<16){ char* end; only[nonly++]=strtoull(e,&end,16); e= *end==','? end+1 : NULL; } }
-    if(nonly){ cam=0; for(int i=0;i<nonly;i++) cam|= only[i]==o; } }
+    if(nonly){ cam=0; for(int i=0;i<nonly;i++) cam|= only[i]==o; }
+    /* test only: SWR_FOV_SKIP=hex,hex... keeps those callers at the game's angle (finding the arm cannon's own projection) */
+    static u64 skip[16]; static int nskip, sinit; if(!sinit){ sinit=1; const char* e=getenv("SWR_FOV_SKIP"); while(e && *e && nskip<16){ char* end; skip[nskip++]=strtoull(e,&end,16); e= *end==','? end+1 : NULL; } }
+    for(int i=0;i<nskip;i++) if(skip[i]==o) cam=0; }
   { /* each caller once in the log: which projections there are, and which the setting widens */
     static u64 seen[64]; static int n; int known=0;
     for(int i=0;i<n;i++) known|= seen[i]==lr;

@@ -12,6 +12,7 @@ static KShmem* g_hid_shm;
 PadState g_pad;
 /* the controller's motion, set by the input backend (backend_win32.c sdl_poll): Switch units and axes */
 volatile float g_motion_gyro[3], g_motion_acc[3]; volatile unsigned long long g_motion_ns;
+volatile long long g_motion_pend_u[3]; volatile unsigned long long g_motion_mouse_ns;   /* mouse Pointer mode: angle moved since the last update, in millionths of a turn */
 static u64 g_samp;
 static u32 g_style_supported=0x7F;
 static KEvent* g_style_ev[10];
@@ -74,13 +75,19 @@ void hid_update(void){
   float acc[3]={0,0,-1}, gyr[3]={0,0,0};
   static float ang[3], q[4]={1,0,0,0}; static u64 m_last;
   { u64 now=plat_ns(); float dt= m_last? (float)((now-m_last)/1e9) : 0.f; m_last=now; if(dt>0.1f) dt=0.1f;
-    if(g_motion_ns && now-g_motion_ns<200000000ull){
-      for(int k=0;k<3;k++){ gyr[k]=g_motion_gyro[k]; acc[k]=g_motion_acc[k]; ang[k]+=gyr[k]*dt; }
+    int mouse= g_motion_mouse_ns && now-g_motion_mouse_ns<200000000ull;
+    if(mouse || (g_motion_ns && now-g_motion_ns<200000000ull)){
+      if(mouse){ float hd= dt>0.002f? dt : 0.002f;   /* the angle moved this update, as a speed over it */
+        for(int k=0;k<3;k++){ float turned=(float)__atomic_exchange_n(&g_motion_pend_u[k],0,__ATOMIC_RELAXED)/1e6f; gyr[k]=turned/hd; acc[k]=g_motion_acc[k]; ang[k]+=turned; } }
+      else for(int k=0;k<3;k++){ gyr[k]=g_motion_gyro[k]; acc[k]=g_motion_acc[k]; ang[k]+=gyr[k]*dt; }
       /* q += 0.5 * q * (0, w) dt, w in rad/s */
       float wx=gyr[0]*6.2831853f, wy=gyr[1]*6.2831853f, wz=gyr[2]*6.2831853f;
       float a=q[0], b=q[1], c=q[2], d=q[3], h=0.5f*dt;
       q[0]+=h*(-b*wx-c*wy-d*wz); q[1]+=h*(a*wx+c*wz-d*wy); q[2]+=h*(a*wy-b*wz+d*wx); q[3]+=h*(a*wz+b*wy-c*wx);
-      float n=sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]); if(n>0) for(int k=0;k<4;k++) q[k]/=n; } }
+      float n=sqrtf(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]); if(n>0) for(int k=0;k<4;k++) q[k]/=n;
+      /* the mouse: gravity turns with the aim, as a real controller's accelerometer would. Held level while the "gyro"
+         pitched, it disagreed, and the game's drift correction pulled the aim back toward the centre (2026-11-14) */
+      if(mouse){ float w=q[0], x=q[1], y=q[2], z=q[3]; acc[0]=-2*(x*z-w*y); acc[1]=-2*(y*z+w*x); acc[2]=-(1-2*(x*x+y*y)); } } }
   memcpy(six+HO_HidSixAxisSensorState_acceleration,acc,12);
   memcpy(six+HO_HidSixAxisSensorState_acceleration+12,gyr,12);   /* angular_velocity follows acceleration */
   memcpy(six+HO_HidSixAxisSensorState_acceleration+24,ang,12);   /* then angle */
@@ -107,7 +114,8 @@ void hid_update(void){
   lifo_push(b+HO_HidSharedMemory_mouse,8+HS_HidMouseState,ms,sizeof ms,g_samp);
   u8 dp[HS_HidDebugPadState]; memset(dp,0,sizeof dp); memcpy(dp,&g_samp,8);
   lifo_push(b+HO_HidSharedMemory_debug_pad,8+HS_HidDebugPadState,dp,sizeof dp,g_samp);
-  { extern void cheats_tick(void); cheats_tick(); }   /* cheat codes and the FOV hook, once per update like dmnt */
+  { extern void cheats_tick(void); cheats_tick(); }
+  { extern void dk_tick(void); dk_tick(); }   /* devkit toggles held at their value (devkit.c) */   /* cheat codes and the FOV hook, once per update like dmnt */
 }
 
 static int hid_applet_res(SvcObj* o, IpcCtx* c){

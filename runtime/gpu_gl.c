@@ -589,6 +589,15 @@ static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t-
       { static int dmp=-1, nd; if(dmp<0) dmp=getenv("SWR_DUMP_TEX")!=NULL;
         if(dmp && l==0 && layer==0 && nd<20 && (f->astc || (!f->compressed && f->bpp==4))){ char pth[128]; snprintf(pth,sizeof pth,"tex_%02d_%llx_%ux%u.ppm",nd++,(unsigned long long)t->gva,lw,lh);
           FILE* fo=fopen(pth,"wb"); if(fo){ fprintf(fo,"P6\n%u %u\n255\n",lw,lh); for(u64 k=0;k<(u64)lw*lh;k++) fwrite(up+k*4,1,3,fo); fclose(fo); } } }
+      { /* test only: SWR_DUMP_TEX_SIZE=WxH writes the first channel of each texture of that size (once per address) as
+           texsz_<address>.pgm, e.g. the font pages whose button glyphs the prompts use */
+        static int ds=-1; static u32 dw, dh; static u64 done[16]; static int nd;
+        if(ds<0){ const char* e=getenv("SWR_DUMP_TEX_SIZE"); ds= e && sscanf(e,"%ux%u",&dw,&dh)==2; }
+        if(ds && l==0 && layer==0 && lw==dw && lh==dh && nd<16){ int seen=0; for(int q=0;q<nd;q++) seen|= done[q]==t->gva;
+          if(!seen && (up==dec || !f->compressed)){ done[nd++]=t->gva; size_t px= up==dec? 4 : (size_t)(f->bpp? f->bpp : 1), stride= up==dec? (size_t)lw*4 : (size_t)rowb;
+            char pth[128]; snprintf(pth,sizeof pth,"captures/texsz_%llx.pgm",(unsigned long long)t->gva); plat_mkdir("captures");
+            FILE* fo=fopen(pth,"wb"); if(fo){ fprintf(fo,"P5\n%u %u\n255\n",lw,lh); for(u32 y=0;y<lh;y++) for(u32 x=0;x<lw;x++) fputc(up[(size_t)y*stride+(size_t)x*px],fo); fclose(fo); }
+            LOG("texture dump: %s, %ux%u, %u bytes a pixel%s, %u levels\n",pth,lw,lh,(unsigned)px,up==dec? " (decoded)" : "",t->levels); } } }
       upload_stage=plat_ns();
       if(bps>=0){ glBindBuffer(GL_PIXEL_UNPACK_BUFFER,g_bp[bps].b); up=NULL; }   /* offset 0 in the buffer */
       if(f->compressed && !f->astc && !f->dec){
@@ -673,6 +682,8 @@ static u64 tex_creation_ns,tex_creation_names_ns,tex_creation_storage_ns,tex_cre
 static Tex* tex_create(u64 gva, u32 w, u32 h, u32 d, u32 levels, GLenum target, GlFmt f, u32 fkey, u32 bl, u32 bh, u32 bd, u32 pitch, int is_rt){
   u64 creation_start=plat_ns(),creation_stage; tex_creation_calls++;
   g_tmap_gen++;
+  { static int ds=-1; static u32 dw; if(ds<0){ const char* e=getenv("SWR_DUMP_TEX_SIZE"); ds= e && sscanf(e,"%u",&dw)==1; }   /* test only (see the upload); 1 = every one-byte texture of 512 or more */
+    static u32 nl; if(ds && (w==dw || (dw==1 && f.bpp==1 && !f.compressed && w>=512 && h>=512)) && nl<200 && (++nl)) LOG("texture dump: created %llx %ux%ux%u, %u levels, format %x (fkey %x, %u bytes a pixel%s), rt %d\n",(unsigned long long)gva,w,h,d,levels,f.ifmt,fkey,f.bpp,f.compressed? ", compressed" : "",is_rt); }
   Tex* t=calloc(1,sizeof *t); t->swz[0]=GL_RED; t->swz[1]=GL_GREEN; t->swz[2]=GL_BLUE; t->swz[3]=GL_ALPHA; t->gva=gva; t->w=w; t->h=h; t->d=d; t->levels=levels; t->target=target; t->f=f; t->fkey=fkey; t->bl=bl; t->bh=bh; t->bd=bd; t->pitch=pitch; t->is_rt=is_rt;
   creation_stage=plat_ns();
   glGenTextures(1,&t->id); glBindTexture(target,t->id);
@@ -1244,28 +1255,38 @@ static void aw_write(const char* path, const void* d, size_t n, int append);
 #define TR_VERSION TR_HEX(TR_VER)
 #define TRANSLATED_PATH "shader_cache/translated_v" TR_STR(TR_VER) ".bin"
 typedef struct {u32 idx,off,value;} TransDep;
-typedef struct Translated {u64 key;ShaderInfo si;char*src;u32 ndep;TransDep dep[128];struct Translated*next;int chk;} Translated;   /* chk: 0 unchecked, 1 usable, 2 old loop translation */
+#define TDEP_MAX 512   /* constants one translation may read (each recorded once): jump tables of up to 64 words, several a shader */
+typedef struct Translated {u64 key;ShaderInfo si;char*src;u32 ndep;TransDep*dep;struct Translated*next;int chk;} Translated;   /* chk: 0 unchecked, 1 usable, 2 old loop translation */
 static Translated* translated[512];static u32 translated_count,translated_hits;
-static TransDep trans_dep[128];static u32 trans_ndep;static int trans_overflow;
+static TransDep trans_dep[TDEP_MAX];static u32 trans_ndep;static int trans_overflow;
 /* Tried 2026-11-12 and reverted: caching translations made without their jump table (a failed read kept as a condition)
    let draws use the "can jump anywhere" versions, which are far heavier on the GPU: 43 and 29 FPS instead of 60, more
    draws waiting. The exact version, translated at the first draw with the table, stays the fast one */
 #define TDEP_FAILED 0x80000000u
-static int g_tr_nostate;
+/* A read that failed (past the end of the bank), kept as a condition: the entry matches only while it still fails. The
+   jump-table reader walks up to 64 words and stops at the first it can't read, so a table at the end of its bank always
+   ends with one; counted as an overflow, none of them was ever cached (2026-11-13: 0 of 80,101 cached translations had
+   their tables), and each was translated again on the GL thread at its first draw of every start. Unlike the reverted try
+   above, the version made without a table is only used while the table is still missing, as the draw would make it */
+#define TDEP_END 0x40000000u
+static int g_tr_nostate; static u32 g_tr_ovf;
 static int trans_cb_read(u32 idx,u32 off,u32*out){
-  int ok=sh_cb_read(idx,off,out);/* Record failed reads too: their availability can change. */
-  if(!ok){trans_overflow=1;return 0;}
-  if(trans_ndep<128)trans_dep[trans_ndep++]=(TransDep){idx,off,*out};else trans_overflow=1;
+  int ok=sh_cb_read(idx,off,out); if(!ok) *out=0;
+  for(u32 i=0;i<trans_ndep;i++) if((trans_dep[i].idx&~TDEP_END)==idx && trans_dep[i].off==off) return ok;   /* read before (the table reader runs more than once per jump) */
+  if(trans_ndep<TDEP_MAX)trans_dep[trans_ndep++]= ok? (TransDep){idx,off,*out} : (TransDep){idx|TDEP_END,off,0};
+  else if(!trans_overflow){ trans_overflow=1; if(!(g_tr_ovf++%20)) LOG("shaders: %u translations read over %u constants (not cached)\n",g_tr_ovf,TDEP_MAX); }
   return ok;
 }
 static void translated_put(Translated*t){u32 b=(u32)(t->key^(t->key>>32))&511;t->next=translated[b];translated[b]=t;translated_count++;}
 static void translated_load(void){
   FILE*f=fopen(TRANSLATED_PATH,"rb");if(!f)return;
   for(;;){u32 hd[5];u64 key;if(fread(hd,sizeof hd,1,f)!=1)break;
-    if(hd[0]!=0x544c4753||hd[1]!=TR_VERSION||hd[2]!=sizeof(ShaderInfo)||hd[3]>(8u<<20)||hd[4]>128||fread(&key,8,1,f)!=1)break;
-    Translated*t=calloc(1,sizeof*t);t->key=key;t->ndep=hd[4];t->src=malloc((size_t)hd[3]+1);
-    if(fread(&t->si,sizeof t->si,1,f)!=1||fread(t->dep,sizeof(TransDep),t->ndep,f)!=t->ndep||fread(t->src,1,hd[3],f)!=hd[3]){free(t->src);free(t);break;}
-    t->src[hd[3]]=0;translated_put(t);
+    if(hd[0]!=0x544c4753||hd[1]!=TR_VERSION||hd[2]!=sizeof(ShaderInfo)||hd[3]>(8u<<20)||hd[4]>TDEP_MAX||fread(&key,8,1,f)!=1)break;
+    Translated*t=calloc(1,sizeof*t);t->key=key;t->ndep=hd[4];t->src=malloc((size_t)hd[3]+1);t->dep=malloc(t->ndep*sizeof(TransDep)+1);
+    if(fread(&t->si,sizeof t->si,1,f)!=1||fread(t->dep,sizeof(TransDep),t->ndep,f)!=t->ndep||fread(t->src,1,hd[3],f)!=hd[3]){free(t->src);free(t->dep);free(t);break;}
+    t->src[hd[3]]=0;
+    { int dead=0; for(u32 i=0;i<t->ndep;i++) dead|= (t->dep[i].idx&TDEP_FAILED)!=0; if(dead){ free(t->src); free(t->dep); free(t); continue; } }   /* the reverted try's: never match, kept out of memory */
+    translated_put(t);
   }fclose(f);if(translated_count)LOG("shaders: %u translated stages loaded before starting the game\n",translated_count);
 }
 static u64 translated_key(u64 hash,int stage,u32 key2,const ShaderInfo*input){
@@ -1276,7 +1297,9 @@ static u64 translated_key(u64 hash,int stage,u32 key2,const ShaderInfo*input){
 }
 static Translated*translated_get(u64 key){
   for(Translated*t=translated[(u32)(key^(key>>32))&511];t;t=t->next)if(t->key==key){
-    int ok=1;for(u32 i=0;i<t->ndep;i++){u32 v;if(!sh_cb_read(t->dep[i].idx,t->dep[i].off,&v)||v!=t->dep[i].value){ok=0;break;}}   /* entries of the reverted try (idx bit 31) never match */
+    int ok=1;for(u32 i=0;i<t->ndep;i++){u32 v; const TransDep*d=&t->dep[i];
+      if(d->idx&TDEP_END){ if(sh_cb_read(d->idx&~TDEP_END,d->off,&v)){ok=0;break;} }   /* failed then: must still fail */
+      else if(!sh_cb_read(d->idx,d->off,&v)||v!=d->value){ok=0;break;}}   /* entries of the reverted try (idx bit 31) never match */
     /* translated before loops were structured (shader.c, 2026-11-08): the pc switch for a plain loop; translate again.
        Newer dispatcher output carries the swr-loop1 mark (a shader that still needs it) */
     if(ok && !t->chk){ static int nl=-1; if(nl<0) nl=getenv("SWR_SHADER_NOLOOP")!=NULL; t->chk= !nl && t->src && strstr(t->src,"switch(pc)") && !strstr(t->src,"swr-loop1")? 2 : 1; }
@@ -1285,11 +1308,36 @@ static Translated*translated_get(u64 key){
   }return NULL;
 }
 static void translated_save(u64 key,const ShaderInfo*si,const char*src){
-  if(!src||trans_overflow)return;u32 n=(u32)strlen(src);Translated*t=calloc(1,sizeof*t);t->key=key;t->si=*si;t->src=malloc((size_t)n+1);memcpy(t->src,src,(size_t)n+1);t->ndep=trans_ndep;memcpy(t->dep,trans_dep,t->ndep*sizeof(TransDep));translated_put(t);
+  if(!src||trans_overflow)return;u32 n=(u32)strlen(src);Translated*t=calloc(1,sizeof*t);t->key=key;t->si=*si;t->src=malloc((size_t)n+1);memcpy(t->src,src,(size_t)n+1);t->ndep=trans_ndep;t->dep=malloc(t->ndep*sizeof(TransDep)+1);memcpy(t->dep,trans_dep,t->ndep*sizeof(TransDep));translated_put(t);
   u32 hd[5]={0x544c4753,TR_VERSION,sizeof(ShaderInfo),n,t->ndep};size_t bytes=sizeof hd+8+sizeof *si+t->ndep*sizeof(TransDep)+n;u8*d=malloc(bytes),*q=d;
   memcpy(q,hd,sizeof hd);q+=sizeof hd;memcpy(q,&key,8);q+=8;memcpy(q,si,sizeof *si);q+=sizeof *si;memcpy(q,t->dep,t->ndep*sizeof(TransDep));q+=t->ndep*sizeof(TransDep);memcpy(q,src,n);
   aw_write(TRANSLATED_PATH,d,bytes,1);free(d);
 }
+/* Shader answers (shader_cache/shader-answers.bin): the constant data a jump-table shader read when a draw translated it
+   (its table, in constant bank 1), with the shader's hash, stage and variant masks. They don't depend on the translator,
+   so the seed's translator thread (seed_ans_pass) can make that exact version ahead on a later start, after a translator
+   update emptied the translated cache, and send it to the helper processes before the game draws it. Record:
+   "SWRA", hash u64, stage, key2, the 6 input masks, ndep, then ndep TransDep */
+#define ANSWERS_PATH "shader_cache/shader-answers.bin"
+typedef struct { u64 h; u32 stage, key2, m[6], ndep; TransDep dep[TDEP_MAX]; } ShAnswer;
+static u64* g_ans_seen; static u32 g_ans_seen_n; static int g_ans_loaded;
+static u64 ans_id(const ShAnswer* a){ return fast_hash((const u8*)a,offsetof(ShAnswer,dep)+a->ndep*sizeof(TransDep),0)|1; }
+static int ans_seen_put(u64 id){ u32 i=(u32)(id^(id>>29))&0xFFFF; for(u32 n=0;n<0x10000;n++,i=(i+1)&0xFFFF){ if(g_ans_seen[i]==id) return 0; if(!g_ans_seen[i]){ g_ans_seen[i]=id; g_ans_seen_n++; return 1; } } return 0; }
+static int ans_read(FILE* f, ShAnswer* a){ u32 mg; if(fread(&mg,4,1,f)!=1 || mg!=0x41525753u || fread(a,offsetof(ShAnswer,dep),1,f)!=1 || a->ndep>TDEP_MAX || fread(a->dep,sizeof(TransDep),a->ndep,f)!=a->ndep) return 0; return 1; }
+static void ans_masks(ShAnswer* a, const ShaderInfo* si){ a->m[0]=si->attr_int_mask; a->m[1]=si->attr_sint_mask; a->m[2]=si->tex_int_mask; a->m[3]=si->tex_sint_mask; a->m[4]=si->rt_int_mask; a->m[5]=si->rt_sint_mask; }
+static void ans_unmask(const ShAnswer* a, ShaderInfo* si){ si->attr_int_mask=a->m[0]; si->attr_sint_mask=a->m[1]; si->tex_int_mask=a->m[2]; si->tex_sint_mask=a->m[3]; si->rt_int_mask=a->m[4]; si->rt_sint_mask=a->m[5]; }
+/* GL thread, at a draw's new shader: keep what a jump-table translation read (new ones only; also those found translated
+   from before answers were kept, so a cache made earlier still gives its answers) */
+static void ans_record(u64 h, int stage, u32 key2, const ShaderInfo* in, u32 ndep, const TransDep* dep){
+  static int off=-1; if(off<0) off=getenv("SWR_NO_SHADER_ANSWERS")!=NULL; if(off || !ndep || ndep>TDEP_MAX) return;
+  if(!g_ans_loaded){ g_ans_loaded=1; g_ans_seen=calloc(0x10000,8); if(!g_ans_seen){ off=1; return; }
+    FILE* f=fopen(ANSWERS_PATH,"rb"); if(f){ static ShAnswer r; while(ans_read(f,&r)) ans_seen_put(ans_id(&r)); fclose(f); } }
+  if(g_ans_seen_n>=60000) return;
+  static ShAnswer a; memset(&a,0,sizeof a); a.h=h; a.stage=(u32)stage; a.key2=key2; ans_masks(&a,in); a.ndep=ndep; memcpy(a.dep,dep,ndep*sizeof(TransDep));
+  if(!ans_seen_put(ans_id(&a))) return;
+  u8 b[4+sizeof a]; u32 mg=0x41525753u; size_t n=offsetof(ShAnswer,dep)+ndep*sizeof(TransDep); memcpy(b,&mg,4); memcpy(b+4,&a,n);
+  aw_write(ANSWERS_PATH,b,4+n,1);
+  { static u32 nr; if(!(nr++%200)) LOG("shaders: %u shader answers kept (jump tables read at draws, for translating ahead next time)\n",g_ans_seen_n); } }
 
 /* NaN guard: a pixel shader's float outputs have NaN replaced by 0 before every return. A NaN written to an HDR target
    spreads through the blur and downsample passes into hard-edged black boxes over the whole view (Metroid Prime 4's
@@ -1400,11 +1448,14 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   if(stage==ST_FS){ s->si.tex_int_mask=attr_int; s->si.tex_sint_mask=attr_sint; s->si.rt_int_mask=g_fs_rtm; s->si.rt_sint_mask=g_fs_rts; }
   else { s->si.attr_int_mask=attr_int; s->si.attr_sint_mask=attr_sint; }
   u64 trans_start=plat_ns();u64 trans_key=translated_key(h,stage,key2,&s->si);Translated*cached=translated_get(trans_key);
-  char*src=NULL;trans_ndep=0;trans_overflow=0;
+  char*src=NULL;trans_ndep=0;trans_overflow=0; ShaderInfo ans_in=s->si;
   if(cached && cached->si.unsupported) cached=NULL;   /* translated before the translator could: try again */
+  if(cached && cached->ndep) ans_record(h,stage,key2,&ans_in,cached->ndep,cached->dep);
   if(cached){s->si=cached->si;src=malloc(strlen(cached->src)+1);strcpy(src,cached->src);}
   else {g_shader_cb_read=trans_cb_read;src=shader_to_glsl(code,0x10000,stage,&s->si);g_shader_cb_read=sh_cb_read;}
   if(cached)shader_reuse_ns+=plat_ns()-trans_start;else shader_translate_ns+=plat_ns()-trans_start;
+  { static u32 nc, nt, ntab, novf; static u64 tns; if(cached) nc++; else { nt++; tns+=plat_ns()-trans_start; if(trans_ndep) ntab++; if(trans_overflow) novf++; }
+    if(!((nc+nt)%50)) LOG("shaders: at draws: %u from the translated cache, %u translated (%u read constants, %u not cacheable), %.0f ms translating\n",nc,nt,ntab,novf,tns/1e6); }
   /* dump shaders with indirect branches (code + cbufs) for offline analysis */
   { extern int g_opt_diag; if(g_opt_diag && src && strstr(src,"uint t_ = uint(")){ static int nb; if(nb<24){ nb++; plat_mkdir("captures"); plat_mkdir("captures/failed"); char fp[200];
       snprintf(fp,sizeof fp,"captures/failed/%016llx_%s.bin",(unsigned long long)h,stage==ST_VS?"vs":"fs"); FILE* f=fopen(fp,"wb"); if(f){ fwrite(code,1,0x10000,f); fclose(f); }
@@ -1416,7 +1467,8 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   if(s->si.unsupported && (strstr(s->si.first_unsupported,"untracked") || !strncmp(s->si.first_unsupported,"STG",3) || !strncmp(s->si.first_unsupported,"LDG",3))){ static int nd; if(nd<8){ nd++; char fp[200]; plat_mkdir("captures"); plat_mkdir("captures/failed");
       snprintf(fp,sizeof fp,"captures/failed/%016llx_%s.bin",(unsigned long long)h,stage==ST_VS?"vs":"fs"); aw_write(fp,code,0x10000,0);
       LOG("shader %016llx saved to %s (send it so the missing texture can be analyzed)\n",(unsigned long long)h,fp); } }
-  if(!cached){src=sh_post(src,stage);if(stage==ST_FS)src=sh_nan_guard(src);translated_save(trans_key,&s->si,src);}
+  if(!cached){src=sh_post(src,stage);if(stage==ST_FS)src=sh_nan_guard(src);translated_save(trans_key,&s->si,src);
+    if(src && !trans_overflow && trans_ndep) ans_record(h,stage,key2,&ans_in,trans_ndep,trans_dep);}
   if(stage==ST_FS) src=sh_dbg(src,h);
   if(stage==ST_FS) src=sh_view(src,h);
   GLenum ty= stage==ST_VS? GL_VERTEX_SHADER : stage==ST_FS? GL_FRAGMENT_SHADER : stage==ST_GS? GL_GEOMETRY_SHADER : stage==ST_CS? GL_COMPUTE_SHADER : stage==ST_TCS? GL_TESS_CONTROL_SHADER : GL_TESS_EVALUATION_SHADER;
@@ -2233,6 +2285,14 @@ int r3d_blit_gl(Surf2Dg* s, Surf2Dg* d, int dx, int dy, int dw, int dh, double s
   glBindFramebuffer(GL_DRAW_FRAMEBUFFER,g_dfbo); glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,dt->id,0); { GLenum b=GL_COLOR_ATTACHMENT0; glDrawBuffers(1,&b); }
   glDisable(GL_SCISSOR_TEST); glDisable(GL_FRAMEBUFFER_SRGB); glColorMaski(0,1,1,1,1);
   float S=g_scale; int scaled= sdx!=1.0 || sdy!=1.0 || S!=1.0f;
+  { /* field of view setting: the scan popup copies the scene behind each of its panels into a side buffer, at the panels'
+       places in the game's own view; the HUD fix draws the panels larger (hud_fov), so their glass read past the copied
+       rectangles into black: a box in the middle of the popup (F8 2026-11-13 18:52:58, 21-79% of the width). A same-place,
+       same-size copy out of a HUD-sized target takes the whole surface instead */
+    extern volatile float g_fov_comp;
+    if(g_fov_comp>1.0001f && st->w==dt->w && st->h==dt->h && ((st->w==1600 && st->h==900) || (st->w==1280 && st->h==720))
+       && fabs(sdx-1.0)<1e-6 && fabs(sdy-1.0)<1e-6 && fabs(sx-0.5-dx)<0.01 && fabs(sy-0.5-dy)<0.01 && !getenv("SWR_NO_POPUP_FULLCOPY")){
+      dx=0; dy=0; dw=(int)st->w; dh=(int)st->h; sx=0.0; sy=0.0; } }
   glBlitFramebuffer((GLint)(sx*S),(GLint)(sy*S),(GLint)((sx+sdx*dw)*S),(GLint)((sy+sdy*dh)*S),(GLint)(dx*S),(GLint)(dy*S),(GLint)((dx+dw)*S),(GLint)((dy+dh)*S),GL_COLOR_BUFFER_BIT,(scaled && !st->f.is_int)? GL_LINEAR : GL_NEAREST);
   glBindFramebuffer(GL_FRAMEBUFFER,g_fbo); dt->last_used=g_frame; dt->wgen++; dt->wtick=++g_wtick;
   return 1; }
@@ -2278,6 +2338,56 @@ void gpu_gl_fps_overlay(void){
 int skip_prompt_rgba(u8** px, int* w, int* h, int* tw){ (void)px; (void)w; (void)h; (void)tw; return 0; }
 
 static void hud_fov(float k);
+static u64 g_draw_vs; static int g_draw_indexed;   /* the draw being set up (r3d_draw_gl; gl_perf logs g_draw_vs too) */
+/* Pipeline records (shader_cache/pipes_<driver>.bin), the OpenGL counterpart of PrimeRecomp's shader records and
+   Longshot's pipeline states: each new combination of the stages' program keys and the state NVIDIA's driver compiles
+   a program variant for (target formats, depth format, sRGB, primitive, colour masks, blending). NVIDIA built those
+   variants at the first draw, 180-250 ms each on the GL thread (issue 18); the shader helpers draw each recorded one
+   in their own context ahead of time, which leaves the variant in the driver's disk cache for the game to load */
+typedef struct { u32 magic, mode; u64 key[3]; u32 rt[8], z, flags, cmask, benable, blend[7]; } PipeRec;
+static u64* g_pipe_seen; static u32 g_pipe_n, g_pipe_new;
+static void pipe_record(const u32* r, u64 kvs, u64 kfs, u64 kgs, GLenum mode){
+  static int off=-1; if(off<0) off=getenv("SWR_NO_PIPE_RECORD")!=NULL; if(off) return;
+  PipeRec p; memset(&p,0,sizeof p); p.magic=0x31504950u; p.mode=mode; p.key[0]=kvs; p.key[1]=kfs; p.key[2]=kgs;
+  for(int i=0;i<g_nrt && i<8;i++) p.rt[i]= g_rt[i]? g_rt[i]->f.ifmt : 0;
+  p.z= g_zt? g_zt->f.ifmt : 0;
+  p.flags= (r[0x4B8]&1) | ((r[0x3E4]? 1u : 0u)<<1) | (((r[0x64F]&0x18)!=0)<<2);
+  for(int i=0;i<8 && i<g_nrt;i++){ u32 cm= r[0x3E4]? r[0x680] : r[0x680+i];
+    p.cmask|= ((cm&0xF)!=0 | ((cm&0xF0)!=0)<<1 | ((cm&0xF00)!=0)<<2 | ((cm&0xF000)!=0)<<3)<<(i*4); if(r[0x4D8+i]) p.benable|=1u<<i; }
+  if(p.benable&1){ const u32* b=&r[0x780]; if(r[0x4B9]){ for(int k=0;k<6;k++) p.blend[k]=b[1+k]; p.blend[6]=1; } else { p.blend[0]=r[0x4D0]; p.blend[1]=r[0x4D1]; p.blend[2]=r[0x4D2]; p.blend[3]=r[0x4D3]; p.blend[4]=r[0x4D4]; p.blend[5]=r[0x4D6]; } }
+  u64 h=fast_hash((const u8*)&p,sizeof p,0)|1;
+  if(!g_pipe_seen){ g_pipe_seen=calloc(1u<<18,8); if(!g_pipe_seen){ off=1; return; }
+    char path[200]; snprintf(path,sizeof path,"shader_cache/pipes_%s.bin",g_pc_tag);   /* the ones from earlier runs */
+    FILE* f=fopen(path,"rb"); if(f){ PipeRec q; while(fread(&q,sizeof q,1,f)==1){ if(q.magic!=0x31504950u) break; u64 qh=fast_hash((const u8*)&q,sizeof q,0)|1;
+        u32 i=(u32)(qh^(qh>>29))&0x3FFFF; while(g_pipe_seen[i] && g_pipe_seen[i]!=qh) i=(i+1)&0x3FFFF; if(!g_pipe_seen[i]){ g_pipe_seen[i]=qh; g_pipe_n++; } } fclose(f); }
+    LOG("shaders: %u pipeline records from earlier runs\n",g_pipe_n); }
+  u32 i=(u32)(h^(h>>29))&0x3FFFF; while(g_pipe_seen[i] && g_pipe_seen[i]!=h) i=(i+1)&0x3FFFF;
+  if(g_pipe_seen[i] || g_pipe_n>=200000) return;
+  g_pipe_seen[i]=h; g_pipe_n++; g_pipe_new++;
+  char path[200]; snprintf(path,sizeof path,"shader_cache/pipes_%s.bin",g_pc_tag); aw_write(path,&p,sizeof p,1);
+  if(!(g_pipe_new%500)) LOG("shaders: %u new pipeline records this run (%u in all)\n",g_pipe_new,g_pipe_n); }
+int g_opt_arm_large=0;   /* [Display] arm_cannon_large (main.c) */
+/* Samus's left hand shares the arm cannon's depth layer: drawn by these vertex shaders in the colour pass (F5 trace 004,
+   2026-11-14: 6351 and 192 vertices, bottom edge left of centre). Its depth pass uses the arm's shared shaders, so the
+   hand is known by its index buffer, learned from the colour pass */
+static int arm_is_hand(u64 vs, u64 ib){
+  static u64 hib[8]; static int n;
+  if(!ib) return 0;
+  if(vs==0xd785e62d24d6549full || vs==0xe741c4164c565d19ull){ int have=0; for(int i=0;i<n;i++) have|= hib[i]==ib;
+    if(!have){ if(n<8) hib[n++]=ib; else { memmove(hib,hib+1,7*sizeof *hib); hib[7]=ib; } } return 1; }
+  for(int i=0;i<n;i++) if(hib[i]==ib) return 1;
+  return 0; }
+/* The arm rig (cannon and hand) is drawn in that layer twice, a depth-only pass first; the visor's effects (the frost of
+   the cold areas: 6-vertex quads, F5 traces 011-012) only in colour. A draw counts as the rig when it is depth-only, or
+   when its index buffer was in this frame's or the last frame's depth pass */
+static int arm_is_rig(u64 ib, int depth_only){
+  static u64 cur[32], prev[32]; static int nc, np; static u32 fr;
+  if(fr!=g_frame){ memcpy(prev,cur,sizeof cur); np=nc; nc=0; fr=g_frame; }
+  if(!ib) return 0;
+  if(depth_only){ int have=0; for(int i=0;i<nc;i++) have|= cur[i]==ib; if(!have && nc<32) cur[nc++]=ib; return 1; }
+  for(int i=0;i<nc;i++) if(cur[i]==ib) return 1;
+  for(int i=0;i<np;i++) if(prev[i]==ib) return 1;
+  return 0; }
 static void apply_state(GpuChannel* ch){
   u32* r=ch->r3d;
   { u32 sig[256]; int n=0;
@@ -2316,7 +2426,19 @@ static void apply_state(GpuChannel* ch){
        shrank toward the centre. Their perspective vertices are enlarged back (shader.c swr_hudfix) */
     extern volatile float g_fov_comp; float k=1.0f;
     if(g_fov_comp>1.0001f && g_nrt>0 && g_rt[0] && ((g_rt[0]->w==1600 && g_rt[0]->h==900) || (g_rt[0]->w==1280 && g_rt[0]->h==720))
-       && g_dl_dr[0]<0.001f && (g_dl_dr[1]>0.999f || fabsf(g_dl_dr[1]-0.03125f)<0.0005f)) k=g_fov_comp;   /* the HUD (0..1) and the visor's front layer (0..1/32: the red hit overlay) */
+       && g_dl_dr[0]<0.001f && (g_dl_dr[1]>0.999f || fabsf(g_dl_dr[1]-0.03125f)<0.0005f || fabsf(g_dl_dr[1]-0.1f)<0.0005f)) k=g_fov_comp;
+      /* the HUD (0..1), the visor's front layer (0..1/32: the red hit overlay) and its glow layer (0..0.1: an additive
+         visor effect in 30 of the F5 traces of 2026-11-13). These are every depth range drawn on the HUD-sized target in
+         traces 148-215; the world draws there at 0.046875..1, which stays as it is */
+    /* the arm cannon: its own depth layer (1/32..3/64, drawn into the world's target) is enlarged back to the game's own
+       size, the "viewmodel field of view" of PC shooters. The aim math stays the game's, so shots still go to the
+       reticle (leaving the arm's tan sites at the game's angle, F9 tests 2 and 3, gave the look but missed the reticle).
+       Off unless [Display] arm_cannon_large=1: the barrel still doesn't line up (the game's anti-aliasing works from the
+       unscaled positions), so it isn't for players yet */
+    { extern int g_opt_arm_large; int arm=g_opt_arm_large;
+      if(arm && k==1.0f && g_fov_comp>1.0001f && fabsf(g_dl_dr[0]-0.03125f)<0.0005f && fabsf(g_dl_dr[1]-0.046875f)<0.0005f
+        ){ u64 ib= g_draw_indexed? (((u64)r[0x5F2]<<32)|r[0x5F3]) : 0;
+        if(arm_is_rig(ib, g_nrt==0 || !g_rt[0]) && !arm_is_hand(g_draw_vs,ib)) k=g_fov_comp; } }   /* the cannon only: the left hand keeps its place, visor effects too */
     hud_fov(k); }
   /* raster state (winding flips with the Y flip) */
   { float w=2*fabsf_(sx), h=2*fabsf_(sy); int yflip= (w<1||h<1)? 0 : (sy<0);
@@ -2752,6 +2874,9 @@ static struct {
   u64 cand, cand_z, last_z, frame_best, frame_best_z; int small_seen; u32 scene_w, scene_h; Tex* last_rt0;
   u64 stable, stable_z, chosen, chosen_z; int streak, missing, done, reset, evals, evaluated;
   Tex *need, *need_z;    /* DLSS runs before the draw that first reads the scene target */
+  u32 szw[4], szh[4], szn[4]; int nsz;   /* this frame's HDR passes with depth, by size: the busiest is next frame's scene */
+  int lut; u64 hdr_gva; u32 hdr_w, hdr_h;   /* this draw: a 3D texture bound (the colour grading LUT), an HDR target read */
+  u64 pair_rt, pair_z; u32 tm_w, tm_h;      /* the last HDR pass's target and depth; the tonemap's input size this frame */
 } g_dlg;
 #ifndef SWR_HAVE_DLSS   /* the public release has no DLSS (NVIDIA's licence question is open): off whatever the .ini says */
 static int dlg_on(void){ return 0; }
@@ -2762,27 +2887,73 @@ static int dlg_full_hdr(const Tex* t){ return t && t->f.ifmt==GL_R11F_G11F_B10F 
 static int dlg_written(u64 a){ for(int i=0;i<g_dlg.nwritten;i++) if(g_dlg.written[i]==a) return 1; return 0; }
 static Tex* dlg_find(u64 gva, int depth){ for(Tex* t=texh[hkey(gva)];t;t=t->next) if(t->gva==gva && t->is_rt && !!t->f.depth==depth) return t; return NULL; }
 /* bind_textures: a render target about to be sampled. The chosen scene target's first read this frame runs DLSS */
+/* the render target behind a sampled one: the tonemap reads the world through a crop (1436x808 of the 1440x808 target,
+   2026-11-14), and the target's depth and its draws have the target's size */
+static Tex* dlg_full_rt(Tex* t){
+  Tex* best=t;
+  for(Tex* q=texh[hkey(t->gva)];q;q=q->next) if(q->gva==t->gva && q->is_rt && !q->f.depth && q->f.ifmt==t->f.ifmt && q->target==GL_TEXTURE_2D
+      && q->w>=t->w && q->h>=t->h && q->w-t->w<=32 && q->h-t->h<=32 && (best==t || q->w*q->h<best->w*best->h || best->w<t->w)) best=q;
+  return best; }
 static void dlg_read(Tex* t){
   if(!dlg_on() || !t->is_rt) return;
+  if(t->f.ifmt==GL_R11F_G11F_B10F && t->target==GL_TEXTURE_2D && !t->f.depth){ Tex* f=dlg_full_rt(t); g_dlg.hdr_gva=f->gva; g_dlg.hdr_w=f->w; g_dlg.hdr_h=f->h; }
+  t=dlg_full_rt(t);
   if(dlg_full_hdr(t) && g_dlg.nreads<16){ int dup=0; for(int i=0;i<g_dlg.nreads;i++) dup|=g_dlg.reads[i]==t->gva; if(!dup) g_dlg.reads[g_dlg.nreads++]=t->gva; }
   if(g_dlg.done || !g_dlg.chosen || t->gva!=g_dlg.chosen || !dlg_written(t->gva)) return;
   g_dlg.done=1;
-  Tex* z= g_dlg.chosen_z? dlg_find(g_dlg.chosen_z,1) : NULL;
+  Tex* z=NULL;   /* the depth at this target's size: that address also holds the HUD's 1600x900 depth */
+  if(g_dlg.chosen_z) for(Tex* q=texh[hkey(g_dlg.chosen_z)];q;q=q->next) if(q->gva==g_dlg.chosen_z && q->is_rt && q->f.depth && q->w==t->w && q->h==t->h){ z=q; break; }
   if(!z || z->w!=t->w || z->h!=t->h || t->target!=GL_TEXTURE_2D || z->target!=GL_TEXTURE_2D) return;
+  { /* the game's resolution scaling changes the scene's size; each new size rebuilt the DLSS feature, 47-85 ms each
+       (2026-11-14, a 75 ms average frame). DLSS keeps its size, and moves to a new one only after 120 frames at it;
+       frames at another size go without DLAA (the jitter is held off after such a frame) */
+    static u32 fw, fh, nw, nh, streak;
+    if(!fw || (t->w==fw && t->h==fh)){ fw=t->w; fh=t->h; streak=0; }
+    else { if(t->w==nw && t->h==nh) streak++; else { nw=t->w; nh=t->h; streak=1; }
+      if(streak<120) return;
+      LOG("dlaa (OpenGL): the scene stayed at %ux%u for 120 frames: DLSS moves to it from %ux%u\n",t->w,t->h,fw,fh);
+      fw=t->w; fh=t->h; streak=0; } }
   g_dlg.need=t; g_dlg.need_z=z; }
 /* r3d_draw_gl, after the draw's textures are bound: a new small pass ends the scene part of the frame; what it writes */
 static void dlg_draw(void){
   if(!dlg_on()){ g_dlg.nreads=0; return; }
   Tex* rt0= g_nrt? g_rt[0] : NULL;
-  if(g_zt && g_zt->f.depth && rt0 && rt0->w==g_zt->w && rt0->h==g_zt->h && g_zt->w>=640){ g_dlg.last_z=g_zt->gva; g_dlg.scene_w=g_zt->w; g_dlg.scene_h=g_zt->h; }
-  if(rt0 && rt0!=g_dlg.last_rt0 && !g_dlg.small_seen && g_dlg.scene_w && rt0->w*4<=g_dlg.scene_w){   /* the first small pass */
-    g_dlg.small_seen=1; g_dlg.frame_best=g_dlg.cand;
-    for(int i=0;i<g_dlg.nreads;i++) g_dlg.frame_best=g_dlg.reads[i];   /* the target the bloom pass reads: after the post effects */
-    g_dlg.frame_best_z=g_dlg.cand_z; }
+  /* the scene: the size of HDR (R11G11B10F) target with depth that had the most draws last frame (dlg_frame). Taking the
+     last such pass, the 3D HUD's few 1600x900 HDR draws (the depth's address is shared at that size) reset it every frame
+     and DLAA never ran: the world has ~270 draws a frame at 1440x808 */
+  if(g_zt && g_zt->f.depth && rt0 && rt0->f.ifmt==GL_R11F_G11F_B10F && rt0->w==g_zt->w && rt0->h==g_zt->h && g_zt->w>=640){
+    int k=0; while(k<g_dlg.nsz && !(g_dlg.szw[k]==g_zt->w && g_dlg.szh[k]==g_zt->h)) k++;
+    if(k==g_dlg.nsz && k<4){ g_dlg.szw[k]=g_zt->w; g_dlg.szh[k]=g_zt->h; g_dlg.szn[k]=0; g_dlg.nsz++; }
+    if(k<4) g_dlg.szn[k]++;
+    if(!g_dlg.scene_w){ g_dlg.scene_w=g_zt->w; g_dlg.scene_h=g_zt->h; }
+    if(g_zt->w==g_dlg.scene_w && g_zt->h==g_dlg.scene_h) g_dlg.last_z=g_zt->gva; }
+  /* the frame's finished world: what the tonemap reads, the first pass writing a non-HDR target at least the scene's size
+     from a scene-size HDR one (Metroid Prime 4: 1440x808 HDR to the 1600x900 picture, with the colour grading LUT). The
+     rule from before the port, "the first pass under a quarter of the scene's width", met the reflection probes' 128x128
+     passes before the world was drawn and never chose anything */
+  /* the tonemap itself: the one pass that reads an HDR target together with a 3D texture (the 33x33x33 colour grading
+     LUT) and writes a non-HDR one. Its input is the finished world whatever size the game's resolution scaling chose,
+     and that input's depth is the one its own passes drew with (pair_rt/pair_z) */
+  if(g_zt && g_zt->f.depth && rt0 && rt0->f.ifmt==GL_R11F_G11F_B10F && rt0->w==g_zt->w && rt0->h==g_zt->h){ g_dlg.pair_rt=rt0->gva; g_dlg.pair_z=g_zt->gva; }
+  if(rt0 && !g_dlg.small_seen && g_dlg.lut && g_dlg.hdr_gva && rt0->f.ifmt!=GL_R11F_G11F_B10F && !rt0->f.depth && rt0->w>=g_dlg.hdr_w && g_dlg.hdr_gva==g_dlg.pair_rt){
+    g_dlg.small_seen=1; g_dlg.frame_best=g_dlg.hdr_gva; g_dlg.frame_best_z=g_dlg.pair_z; g_dlg.tm_w=g_dlg.hdr_w; g_dlg.tm_h=g_dlg.hdr_h; }
+  g_dlg.lut=0; g_dlg.hdr_gva=0;
   g_dlg.last_rt0=rt0;
   if(dlg_full_hdr(rt0)){
     if(!dlg_written(rt0->gva) && g_dlg.nwritten<8) g_dlg.written[g_dlg.nwritten++]=rt0->gva;
     for(int i=0;i<g_dlg.nreads;i++) if(g_dlg.reads[i]!=rt0->gva){ g_dlg.cand=g_dlg.reads[i]; g_dlg.cand_z=g_dlg.last_z; } }
+  { /* test only: SWR_DLSS_MAP=1 logs every 600 frames the targets drawn to before the DLSS point (the world, which an
+       upscaling mode would render smaller) and after it (post effects and HUD, which stay full size) */
+    static int map=-1; if(map<0) map=getenv("SWR_DLSS_MAP")!=NULL;
+    if(map){ static struct { u64 a; u32 w,h,fmt,pre,post; int depth; } m[64]; static int n; static u32 last;
+      Tex* ts[9]; int nt=0; for(int i=0;i<g_nrt && i<8;i++) if(g_rt[i]) ts[nt++]=g_rt[i]; if(g_zt) ts[nt++]=g_zt;
+      for(int i=0;i<nt;i++){ Tex* t=ts[i]; int k=0; for(;k<n;k++) if(m[k].a==t->gva && m[k].w==t->w && m[k].h==t->h) break;
+        if(k==n && n<64){ m[n].a=t->gva; m[n].w=t->w; m[n].h=t->h; m[n].fmt=t->f.ifmt; m[n].depth=t->f.depth; m[n].pre=m[n].post=0; n++; }
+        if(k<n){ if(g_dlg.done) m[k].post++; else m[k].pre++; } }
+      if(g_frame-last>=600){ last=g_frame;
+        LOG("dlss map: scene %ux%u, DLSS on %llx (depth %llx), %d targets\n",g_dlg.scene_w,g_dlg.scene_h,(unsigned long long)g_dlg.chosen,(unsigned long long)g_dlg.chosen_z,n);
+        for(int k=0;k<n;k++) LOG("dlss map:   %llx %ux%u fmt %x%s: %u draws before, %u after\n",(unsigned long long)m[k].a,m[k].w,m[k].h,m[k].fmt,m[k].depth? " depth" : "",m[k].pre,m[k].post);
+        n=0; } } }
   g_dlg.nreads=0; }
 /* ---- jitter and motion vectors (as in the native Vulkan renderer's dlss.c): each depth-prepass draw of the scene
    (depth writes on, triangle list, no geometry/tessellation stage) has its positions captured by transform feedback;
@@ -2951,7 +3122,10 @@ static void dlg_frame(void){
   if(g_dmv.jit_used && !g_dlg.evaluated){ g_dmv.hold=60; g_dmv.misses++; } else if(g_dmv.hold) g_dmv.hold--;   /* jittered without DLSS: that frame shook */
   g_dmv.jit_ok= g_dlg.evaluated && !g_dmv.hold; g_dmv.jit_used=0; g_dlg.evaluated=0;
   g_dlg.nwritten=g_dlg.nreads=0; g_dlg.cand=g_dlg.cand_z=0; g_dlg.frame_best=g_dlg.frame_best_z=0;
-  g_dlg.small_seen=0; g_dlg.done=0; g_dlg.last_rt0=NULL; }
+  g_dlg.small_seen=0; g_dlg.done=0; g_dlg.last_rt0=NULL;
+  { int b=-1; for(int k=0;k<g_dlg.nsz;k++) if(b<0 || g_dlg.szn[k]>g_dlg.szn[b]) b=k;
+    if(b>=0){ g_dlg.scene_w=g_dlg.szw[b]; g_dlg.scene_h=g_dlg.szh[b]; } g_dlg.nsz=0;
+    if(g_dlg.tm_w){ g_dlg.scene_w=g_dlg.tm_w; g_dlg.scene_h=g_dlg.tm_h; g_dlg.tm_w=g_dlg.tm_h=0; } } }   /* the tonemap's input wins */
 
 /* Resolution scale, downsampling and small-buffer passes: the game shrinks the scene for its bloom and glow with a few taps per
    output pixel, placed for the guest resolution. At 4x those taps meet 1 rendered pixel in 16, so small bright things
@@ -3006,7 +3180,7 @@ static void bind_textures(GpuChannel* ch, int stage, Sh* s){
     tids[i]=0;
     int sten= t && want==GL_TEXTURE_2D && ((s->si.tex_int_mask>>i)&1) && tic_stencil_read(t,tic,st->cmask);
     int ivk= (!sten && t && want==GL_TEXTURE_2D && ((s->si.tex_int_mask>>i)&1))? tic_int_read(t,tic,st->cmask) : 0;
-    if(t && t->target==want && !(want==GL_TEXTURE_3D && t->zero3d && !t->is_rt && !t->gpu_written)){ if(t->is_rt) dlg_read(t); GLuint use= sten? stencil_view(t) : ivk? int_view(t,ivk) : t->id;
+    if(t && t->target==want && !(want==GL_TEXTURE_3D && t->zero3d && !t->is_rt && !t->gpu_written)){ if(t->is_rt) dlg_read(t); else if(want==GL_TEXTURE_3D) g_dlg.lut=1; GLuint use= sten? stencil_view(t) : ivk? int_view(t,ivk) : t->id;
       if(want==GL_TEXTURE_2D && downsample_read(t,st)){ u64 z0=plat_ns(); GLuint pf=rt_prefiltered(t); st_tb_pre+=plat_ns()-z0; if(pf) use=pf; }
       { static int dbg=-1; if(dbg<0) dbg=getenv("SWR_PREFILTER_DEBUG")!=NULL;
         if(dbg && t->is_rt && g_rt[0] && g_rt[0]!=t && (t->w>g_rt[0]->w || t->h>g_rt[0]->h)){ static u64 seen[64]; static int ns; u64 k=((u64)t->w<<48)^((u64)t->h<<32)^((u64)g_rt[0]->w<<16)^g_rt[0]->h^((u64)st->fetch_only<<63)^((u64)stage<<60);
@@ -3601,7 +3775,9 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
   dlg_jitter(r);
   { static u64 sk[8]; static int nsk=-1; if(nsk<0){ nsk=0; const char* e=getenv("SWR_DBG_SKIPVS"); while(e && *e && nsk<8){ sk[nsk++]=strtoull(e,(char**)&e,16); if(*e==',') e++; else break; } }   /* debugging: skip draws by vertex or pixel shader hash */
     for(int q=0;q<nsk;q++) if(vs->hash==sk[q] || fs->hash==sk[q]){ trace_note("DRAW SKIPPED: debug\n"); return; } }
+  g_draw_vs=vs->hash; g_draw_indexed=indexed;   /* for apply_state's arm cannon rule */
   TM(TM_STATE,apply_state(ch));
+  if(g_sep>0) pipe_record(r,sh_key(vs),sh_key(fs),gs? sh_key(gs) : 0,(GLenum)topology);   /* for building ahead (pipe_record): the guest's topology */
   /* view volume clip control (0x64F): bits 3/4 clamp depth at the near/far planes instead of clipping. Prime 4 sets
      both on every draw (0x101a); without the clamp, geometry right at a plane (its shadow-tile reset triangles, the
      first-person cannon close to the near plane) was cut away */
@@ -4339,6 +4515,21 @@ static void dump_rts(void){
 
 static void APIENTRY gl_dbg(GLenum src, GLenum type, GLuint id, GLenum sev, GLsizei len, const GLchar* msg, const void* up){
   (void)src;(void)id;(void)len;(void)up; if(sev==GL_DEBUG_SEVERITY_NOTIFICATION) return; if(type==GL_DEBUG_TYPE_ERROR) WARN("GL: %s\n",msg); }
+/* the driver's performance warnings (gl_perf_on, SWR_GL_PERF_LOG=1): NVIDIA recompiles a program at its first draw with GL
+   state it wasn't built for ("... is being recompiled based on GL state"), which held draws 180-250 ms each on the GL
+   thread for seconds in issue 18 (RTX 4070 Super, first run). Logged with the draw's vertex shader, at most 200 a
+   session: the list of program and state combinations to build ahead */
+static void APIENTRY gl_perf(GLenum src, GLenum type, GLuint id, GLenum sev, GLsizei len, const GLchar* msg, const void* up){
+  (void)src;(void)id;(void)len;(void)up;(void)sev; if(type!=GL_DEBUG_TYPE_PERFORMANCE || !msg) return;
+  static int n; int k=__atomic_add_fetch(&n,1,__ATOMIC_RELAXED); if(k>200) return;   /* may come from the driver's own thread */
+  LOG("gpu: driver performance warning%s (draw's vertex shader %016llx): %.300s\n",k==200? " (the last one logged)" : "",(unsigned long long)g_draw_vs,msg); }
+static void gl_perf_on(void){
+  if(!getenv("SWR_GL_PERF_LOG") || g_verbose>=2) return;   /* opt-in until tested: a run with it on froze at frame 935 (cause not yet known) */
+  typedef void (APIENTRY*DBGCB)(GLDEBUGPROC,const void*); typedef void (APIENTRY*DBGCTL)(GLenum,GLenum,GLenum,GLsizei,const GLuint*,GLboolean);
+  DBGCB f=(DBGCB)backend_gl_proc("glDebugMessageCallback"); DBGCTL c=(DBGCTL)backend_gl_proc("glDebugMessageControl"); if(!f || !c) return;
+  c(GL_DONT_CARE,GL_DONT_CARE,GL_DONT_CARE,0,NULL,GL_FALSE);   /* everything off, then only performance */
+  c(GL_DONT_CARE,GL_DEBUG_TYPE_PERFORMANCE,GL_DONT_CARE,0,NULL,GL_TRUE);
+  f(gl_perf,NULL); glEnable(GL_DEBUG_OUTPUT); }
 /* ============================================================ shader pack
    every new program's GLSL (driver independent) gets appended to shader_cache/shader_pack.bin. at startup
    whatever isn't in the binary cache yet is compiled in the background. the pack can be moved to another PC */
@@ -4380,8 +4571,9 @@ typedef struct { GLuint p, a, b; u64 key; } WarmJob;
 static WarmJob wj[6]; static int wj_n;
 
 extern void splash_progress(int phase, float frac) __attribute__((weak));   /* splash_win32.c; absent elsewhere */
+static u64 g_warm_t0;
 static void warm_load(void){
-  pcache_init();translated_load();
+  pcache_init();translated_load(); g_warm_t0=plat_ns();
   /* the helpers start first: shaders in the pack without a binary for this driver go straight to them (below) */
   if(g_nv_win && g_par>0 && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
   FILE* f=fopen(PACK_PATH,"rb"); if(!f) return; u32 cap=0;
@@ -4397,7 +4589,12 @@ static void warm_load(void){
       if(g_worker!=1){
         if(g_pcache>0 && (st!=ST_VS || strstr(src,"gl_Position = vec4(0.0, 0.0, 0.0, 1.0)"))){
           char path[160];snprintf(path,sizeof path,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
-          static u32 nboot; if(++nboot>10000){ free(src); continue; }   /* at most 10,000 before the first frame (16 s for 7,626 on 2026-11-09): the rest load when the game loads them */
+          static u32 nboot; static int bmax=-1; if(bmax<0){ const char* e=getenv("SWR_BOOT_PROGRAMS"); bmax= e? atoi(e) : 0; }
+            /* none by default (2026-11-13, 4060 Ti, same replay with shader answers): 10,000 at boot took 20 s and left
+               20.6% of frames over 20 ms; none, 11.7% and gameplay 10-25 s sooner. Each program now loads off the GL
+               thread when the game loads it (the pre-build from GPU memory asks the background loader), as Longshot
+               does at program creation. SWR_BOOT_PROGRAMS=N loads N first */
+          if(++nboot>(u32)bmax){ free(src); continue; }   /* at most 10,000 before the first frame (16 s for 7,626 on 2026-11-09): the rest load when the game loads them */
           GLuint p=binary_load(path,1);if(p){ warm_stage_put(key,p,ULOC_LAZY); if(wp_n>=wp_cap){ wp_cap= wp_cap? wp_cap*2 : 1024; wp=realloc(wp,wp_cap*sizeof *wp); } wp[wp_n++]=p; }
           else if(g_helper>0 && !backend_file_exists(path) && hp_job_worth(src)){ u32 sl=a, gt= st==ST_VS? GL_VERTEX_SHADER : st==ST_GS? GL_GEOMETRY_SHADER : GL_FRAGMENT_SHADER; u8* b=malloc((size_t)sl+20);
             if(b){ memcpy(b,"SWRJ",4); memcpy(b+4,&gt,4); memcpy(b+8,&sl,4); memcpy(b+12,src,sl); memcpy(b+12+sl,"SWRJOBOK",8);
@@ -4415,7 +4612,7 @@ static void warm_load(void){
     FILE* t= g_pcache? fopen(path,"rb") : NULL; if(t){ fclose(t); free(vs); free(fs); continue; }   /* already have a binary for this PC */
     if(wq_n>=cap){ cap= cap? cap*2 : 256; wq=realloc(wq,cap*sizeof *wq); } wq[wq_n].key=key; wq[wq_n].vs=vs; wq[wq_n].fs=fs; wq[wq_n].sep=0; wq[wq_n].stage=0; wq_n++; }
   fclose(f);
-  if(warm_stage_count)LOG("shaders: %u cached stage programs prepared before starting the game\n",warm_stage_count);
+  if(warm_stage_count)LOG("shaders: %u cached stage programs prepared before starting the game (%.1f s)\n",warm_stage_count,(plat_ns()-g_warm_t0)/1e9);
   { extern void glq_uloc_prime(const GLuint*,int); if(wp_n && !getenv("SWR_NO_ULOC_PRIME")) glq_uloc_prime(wp,wp_n); free(wp); }
   if(wq_n) LOG("shaders: %u from the pack are precompiled in the background while you play\n",wq_n); }
 static WJob* wlo[16]; static int wlo_n;
@@ -4728,16 +4925,48 @@ static void seed_thread(void* arg){ (void)arg; plat_diag_role("shader-seed"); pl
    translated cache (seed_drain), and only then does the pre-build take that program (seed_feed), which finds it
    translated and just hands it to the helper processes to build. Shaders that read constant data while translating
    can't be done ahead of their draws and are left for the game to load */
-typedef struct { u64 tk; int stage; u32 idx, ndep; ShaderInfo si; char* src; TransDep dep[128]; } SeedTr;   /* src NULL: seed entries before idx are done */
+typedef struct { u64 tk; int stage; u32 idx, ndep; ShaderInfo si; char* src; TransDep dep[TDEP_MAX]; int ans; } SeedTr;   /* src NULL: seed entries before idx are done; ans: made from a shader answer */
 #define SQN 256
 static SeedTr g_sq[SQN]; static volatile u32 g_sq_w, g_sq_r, g_seed_drained; static u32 g_seed_tr_n, g_seed_tr_skip;
 static u8* g_seed_ok;   /* per seed program: 1 translated ahead (the others read the game's data: left for when it loads them) */
 #define SEED_TR_PATH "shader_cache/seed_tr_v" TR_STR(TR_VER) ".bin"   /* which seed programs this translator version did */
-static __thread int t_seed_overflow; static __thread u32 t_seed_ndep; static __thread TransDep t_seed_dep[128];
+static __thread int t_seed_overflow; static __thread u32 t_seed_ndep; static __thread TransDep t_seed_dep[TDEP_MAX];
 static int seed_no_cb(u32 idx, u32 off, u32* out){ (void)idx; (void)off; *out=0; t_seed_overflow=1; return 0; }   /* a jump table: left for the draw (see trans_cb_read) */
+static __thread const ShAnswer* t_ans;   /* the answer pass's reader: the values a draw read; a read it didn't make fails */
+static int seed_ans_cb(u32 idx, u32 off, u32* out){ for(u32 i=0;i<t_ans->ndep;i++) if((t_ans->dep[i].idx&~TDEP_END)==idx && t_ans->dep[i].off==off){
+    *out=t_ans->dep[i].value; int had=0; for(u32 j=0;j<t_seed_ndep && !had;j++) had= t_seed_dep[j].idx==t_ans->dep[i].idx && t_seed_dep[j].off==off;
+    if(!had){ if(t_seed_ndep<TDEP_MAX) t_seed_dep[t_seed_ndep++]=t_ans->dep[i]; else t_seed_overflow=1; } return !(t_ans->dep[i].idx&TDEP_END); }
+  *out=0; t_seed_overflow=1; return 0; }
+#define ANS_DONE_PATH "shader_cache/answers_done_v" TR_STR(TR_VER) ".bin"   /* answers this translator version did (ans_id each) */
 static void sq_push(const SeedTr* t){
   while(__atomic_load_n(&g_sq_w,__ATOMIC_RELAXED)-__atomic_load_n(&g_sq_r,__ATOMIC_ACQUIRE)>=SQN) plat_sleep_ns(2000000);
   u32 w=__atomic_load_n(&g_sq_w,__ATOMIC_RELAXED); g_sq[w%SQN]=*t; __atomic_store_n(&g_sq_w,w+1,__ATOMIC_RELEASE); }
+/* After the seed: the jump-table shaders the game drew before (shader answers), translated with the tables they read,
+   each one once per translator version. The draw then finds it with its tables matching (translated_get), and on NVIDIA
+   the helper processes have its program built already (seed_ans_job) */
+static void seed_ans_pass(void){
+  if(getenv("SWR_NO_SHADER_ANSWERS")) return;
+  FILE* f=fopen(ANSWERS_PATH,"rb"); if(!f) return;
+  u64* done=calloc(1u<<18,8);   /* ids done before, open addressing */
+  { FILE* d=fopen(ANS_DONE_PATH,"rb"); if(d){ u64 id; while(done && fread(&id,8,1,d)==1){ u32 q=(u32)(id^(id>>29))&0x3FFFF; while(done[q] && done[q]!=id) q=(q+1)&0x3FFFF; done[q]=id; } fclose(d); } }
+  u32* hidx=calloc(1u<<18,4);   /* seed index+1 by hash and stage */
+  if(hidx) for(u32 i=0;i<g_seed_n;i++){ u64 k=(g_seed[i].h^(u64)(g_seed[i].stage+1))|1; u32 j=(u32)(k^(k>>31))&0x3FFFF; while(hidx[j]) j=(j+1)&0x3FFFF; hidx[j]=i+1; }
+  u8* code=malloc(0x10000+64); FILE* sf=fopen("shader_cache/seed.bin","rb");
+  static ShAnswer a; u32 n=0, made=0, nomatch=0, failed=0, had=0; u64 t0=plat_ns(); FILE* df=fopen(ANS_DONE_PATH,"ab");
+  while(code && sf && hidx && done && ans_read(f,&a)){ n++; u64 id=ans_id(&a); int seen=0; { u32 q=(u32)(id^(id>>29))&0x3FFFF; while(done[q] && done[q]!=id) q=(q+1)&0x3FFFF; seen= done[q]==id; if(!seen && n<0x30000) done[q]=id; } if(seen){ had++; continue; }
+    if(df) fwrite(&id,8,1,df);
+    u64 k=(a.h^(u64)(a.stage+1))|1; u32 j=(u32)(k^(k>>31))&0x3FFFF; SeedEnt* e=NULL;
+    for(;hidx[j];j=(j+1)&0x3FFFF){ SeedEnt* q=&g_seed[hidx[j]-1]; if(q->h==a.h && (u32)q->stage==a.stage){ e=q; break; } }
+    if(!e){ nomatch++; continue; }   /* a program not in the game files (made by the game in memory) */
+    if(_fseeki64(sf,(long long)e->off,SEEK_SET) || fread(code,1,e->len,sf)!=e->len){ failed++; continue; } memset(code+e->len,0,64);
+    int stage=e->stage; ShaderInfo si; memset(&si,0,sizeof si); ans_unmask(&a,&si); u64 tk=translated_key(e->h,stage,a.key2,&si);
+    t_ans=&a; t_seed_overflow=0; t_seed_ndep=0; g_shader_cb_read=seed_ans_cb; char* src=shader_to_glsl(code,e->len+64,stage,&si); g_shader_cb_read=NULL;
+    if(!src || si.unsupported || t_seed_overflow){ free(src); failed++; continue; }
+    src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src);
+    static SeedTr t; t.tk=tk; t.stage=stage; t.idx=0; t.si=si; t.src=src; t.ndep=t_seed_ndep; memcpy(t.dep,t_seed_dep,t_seed_ndep*sizeof(TransDep)); t.ans=1;
+    sq_push(&t); made++; }
+  if(df) fclose(df); if(sf) fclose(sf); free(code); free(hidx); free(done); fclose(f);
+  LOG("shaders: shader answers: %u kept, %u translated ahead now, %u done before, %u not in the game files, %u failed, %.1f s\n",n,made,had,nomatch,failed,(plat_ns()-t0)/1e9); }
 static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-translate"); plat_thread_low_priority();
   while(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE)) plat_sleep_ns(200000000);
   g_seed_ok=calloc(g_seed_n+1,1); if(!g_seed_ok) return;
@@ -4745,7 +4974,7 @@ static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-transla
     FILE* d=fopen(SEED_TR_PATH,"rb"); char mg[8]; u64 sig=0; u32 n=0;
     if(d && fread(mg,1,8,d)==8 && !memcmp(mg,"SWRSTR03",8) && fread(&sig,8,1,d)==1 && sig==g_seed_sig && fread(&n,4,1,d)==1 && n==g_seed_n && fread(g_seed_ok,1,n,d)==n){
       fclose(d); u32 k=0; for(u32 i=0;i<n;i++) k+=g_seed_ok[i]; __atomic_store_n(&g_seed_drained,n,__ATOMIC_RELEASE);
-      LOG("shaders: seed translated before: %u of %u programs ready to build\n",k,n); return; }
+      LOG("shaders: seed translated before: %u of %u programs ready to build\n",k,n); seed_ans_pass(); return; }
     if(d) fclose(d); }
   FILE* f=fopen("shader_cache/seed.bin","rb"); if(!f) return; u8* code=malloc(0x10000+64); if(!code){ fclose(f); return; }
   u64 t0=plat_ns();
@@ -4770,26 +4999,58 @@ static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-transla
   free(code); fclose(f);
   /* written once the GL thread has filed every result (the translated cache is appended there) */
   while(__atomic_load_n(&g_seed_drained,__ATOMIC_ACQUIRE)<g_seed_n) plat_sleep_ns(100000000);
-  FILE* d=fopen(SEED_TR_PATH,"wb"); if(d){ fwrite("SWRSTR03",1,8,d);   /* 03: after the reverted jump-table try (02), redone without those */ fwrite(&g_seed_sig,8,1,d); fwrite(&g_seed_n,4,1,d); fwrite(g_seed_ok,1,g_seed_n,d); fclose(d); } }
+  FILE* d=fopen(SEED_TR_PATH,"wb"); if(d){ fwrite("SWRSTR03",1,8,d);   /* 03: after the reverted jump-table try (02), redone without those */ fwrite(&g_seed_sig,8,1,d); fwrite(&g_seed_n,4,1,d); fwrite(g_seed_ok,1,g_seed_n,d); fclose(d); }
+  seed_ans_pass(); }
+/* GL thread: an answer's translation to the helper processes (NVIDIA), unless its program is built already */
+static void seed_ans_job(SeedTr* t){
+  if(g_helper<=0 || !backend_shader_helper_alive() || !hp_job_worth(t->src)) return;
+  char* src=malloc(strlen(t->src)+1); if(!src) return; strcpy(src,t->src); if(t->stage==ST_VS) src=dlg_vs_xfb(src);
+  Sh tmp; memset(&tmp,0,sizeof tmp); tmp.stage=t->stage; tmp.src=src; u64 key=sh_key(&tmp);
+  char bp[200]; snprintf(bp,sizeof bp,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
+  if(!backend_file_exists(bp)){ u32 sl=(u32)strlen(src), gt= t->stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER; u8* b=malloc((size_t)sl+20);
+    if(b){ memcpy(b,"SWRJ",4); memcpy(b+4,&gt,4); memcpy(b+8,&sl,4); memcpy(b+12,src,sl); memcpy(b+12+sl,"SWRJOBOK",8);
+      char jp[200]; snprintf(jp,sizeof jp,"shader_cache/jobs/%016llx.pjob",(unsigned long long)key); aw_write(jp,b,(size_t)sl+20,0); free(b); g_hp_pre++; } }
+  free(src); }
 /* GL thread: file what the translator finished in the translated cache (it is then found like any other translation) */
 static void seed_drain(void){
   for(int n=0;n<128;n++){ u32 r=__atomic_load_n(&g_sq_r,__ATOMIC_RELAXED); if(r==__atomic_load_n(&g_sq_w,__ATOMIC_ACQUIRE)) break;
     SeedTr* t=&g_sq[r%SQN];
     if(!t->src) g_seed_drained=t->idx;
     else { g_tr_nostate=1; Translated* had=translated_get(t->tk); g_tr_nostate=0;
-      if(!had){ trans_ndep=t->ndep; memcpy(trans_dep,t->dep,t->ndep*sizeof(TransDep)); trans_overflow=0; translated_save(t->tk,&t->si,t->src); } free(t->src); }
+      if(t->ans){ had=NULL; for(Translated* x=translated[(u32)(t->tk^(t->tk>>32))&511];x && !had;x=x->next) if(x->key==t->tk && x->ndep==t->ndep && !memcmp(x->dep,t->dep,t->ndep*sizeof(TransDep))) had=x; }   /* the same tables (a match by the current state means nothing) */
+      if(!had){ trans_ndep=t->ndep; memcpy(trans_dep,t->dep,t->ndep*sizeof(TransDep)); trans_overflow=0; translated_save(t->tk,&t->si,t->src); }
+      if(t->ans){ seed_ans_job(t); n+=7; }   /* a helper job each: fewer a frame */
+      free(t->src); }
     __atomic_store_n(&g_sq_r,r+1,__ATOMIC_RELEASE); } }
 /* the next seed program for the pre-build queue (GL thread), when the game's own are all taken */
+/* Which seed programs are built already, per driver (shader_cache/seed_built_<driver>.bin): a later start skips them.
+   Without it every start fed all 28,000 to the pre-build again, and the render thread's checks took the intro cutscene
+   down to 29-50 FPS (2026-11-13) */
+static u8* g_seed_built; static u32 g_seed_built_new;
+static void seed_built_save(void){ if(!g_seed_built) return; char p[160]; snprintf(p,sizeof p,"shader_cache/seed_built_%s.bin",g_pc_tag);
+  FILE* f=fopen(p,"wb"); if(f){ fwrite("SWRSBT01",1,8,f); fwrite(&g_seed_sig,8,1,f); fwrite(&g_seed_n,4,1,f); fwrite(g_seed_built,1,g_seed_n,f); fclose(f); } g_seed_built_new=0; }
+static void seed_built_mark(u32 i){ if(!g_seed_built || i>=g_seed_n || g_seed_built[i]) return; g_seed_built[i]=1; if(++g_seed_built_new>=2000) seed_built_save(); }
+static void seed_built_load(void){ g_seed_built=calloc(g_seed_n+1,1); if(!g_seed_built) return; char p[160]; snprintf(p,sizeof p,"shader_cache/seed_built_%s.bin",g_pc_tag);
+  FILE* f=fopen(p,"rb"); char mg[8]; u64 sig=0; u32 n=0;
+  if(f && fread(mg,1,8,f)==8 && !memcmp(mg,"SWRSBT01",8) && fread(&sig,8,1,f)==1 && sig==g_seed_sig && fread(&n,4,1,f)==1 && n==g_seed_n){
+    if(fread(g_seed_built,1,n,f)==n){ u32 k=0; for(u32 i=0;i<n;i++) k+=g_seed_built[i]; LOG("shaders: %u seed programs built on earlier starts, skipped\n",k); } }
+  if(f) fclose(f); }
 static int seed_feed(void){
   if(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE) || g_seed_next>=g_seed_n || g_seed_next>=g_seed_drained) return 0;   /* only translated ones */
-  SeedEnt* e=NULL;
-  while(g_seed_next<g_seed_n && g_seed_next<g_seed_drained){ SeedEnt* q=&g_seed[g_seed_next]; int ok= g_seed_ok && g_seed_ok[g_seed_next]; g_seed_next++;
-    if(ok && !mp_seen(q->h,q->stage)){ e=q; break; } }   /* skipped: not translatable ahead, or the game had it already */
+  if(!g_seed_built) seed_built_load();
+  { /* the game first: at most 2 a frame, and none in a frame after one that ran long */
+    static u32 ff, fn; static u64 ft; static int slow;
+    if(ff!=g_frame){ u64 now=plat_ns(); slow= ft && now-ft>20000000ull; ff=g_frame; ft=now; fn=0; }
+    if(slow || fn>=2) return 0; fn++; }
+  SeedEnt* e=NULL; u32 ei=0;
+  while(g_seed_next<g_seed_n && g_seed_next<g_seed_drained){ u32 i=g_seed_next++; SeedEnt* q=&g_seed[i]; int ok= g_seed_ok && g_seed_ok[i];
+    if(ok && !(g_seed_built && g_seed_built[i]) && !mp_seen(q->h,q->stage)){ e=q; ei=i; break; } }   /* skipped: not translatable ahead, built before, or the game had it already */
+  if(g_seed_next>=g_seed_n && g_seed_built_new) seed_built_save();
   if(!e) return 0;
   u8* c=malloc(e->len+64); if(!c) return 0; memset(c+e->len,0,64);
   if(_fseeki64(g_seed_f,(long long)e->off,SEEK_SET) || fread(c,1,e->len,g_seed_f)!=e->len){ free(c); return 0; }
   pm_lock(&g_mp_m); if(g_mp_n==g_mp_cap){ g_mp_cap= g_mp_cap? g_mp_cap*2 : 1024; g_mp=realloc(g_mp,g_mp_cap*sizeof *g_mp); }
-  g_mp[g_mp_n++]=(MemProg){c,e->len+64,e->stage,e->h,0 /* t 0: from the seed, not for the boot list */}; pm_unlock(&g_mp_m);
+  g_mp[g_mp_n++]=(MemProg){c,e->len+64,e->stage,e->h,(1ull<<63)|ei /* t: from the seed (bit 63) and its index; not for the boot list */}; pm_unlock(&g_mp_m);
   if(g_seed_next==g_seed_n) LOG("shaders: every program of the seed has been taken by the pre-build (%u)\n",g_seed_n);
   return 1; }
 static void mem_prebuild_step(void){
@@ -4857,14 +5118,16 @@ static void mem_prebuild_step(void){
     { static int dp=-1; if(dp<0) dp=getenv("SWR_DUMP_PREBUILD")!=NULL; if(dp && stage==ST_VS){ char fp[200]; plat_mkdir("captures"); plat_mkdir("captures/pb"); snprintf(fp,sizeof fp,"captures/pb/%016llx_vs.glsl",(unsigned long long)h); FILE* f=fopen(fp,"w"); if(f){ fputs(src,f); fclose(f); } } }
     if(stage==ST_VS) src=dlg_vs_xfb(src);
     Sh tmp; memset(&tmp,0,sizeof tmp); tmp.stage=stage; tmp.hash=h; tmp.src=src; u64 key=sh_key(&tmp);
-    if(mp.t) pack_add_sh(key,&tmp);   /* the boot list: what the game loaded, not the whole seed (that loads when the game loads it, ld_request) */
+    int from_seed=(int)(mp.t>>63); u32 seed_idx=(u32)mp.t;
+    if(!from_seed) pack_add_sh(key,&tmp);   /* the boot list: what the game loaded, not the whole seed (that loads when the game loads it, ld_request) */
     { static int tsi=-1; if(tsi<0) tsi=getenv("SWR_TEST_STANDIN")!=NULL; if(g_pb_noread || (!c && trans_overflow) || tsi) fb_put(h,stage,key2,key); }   /* translated without its jump table: the stand-in for the exact one */
     char bp[200]; snprintf(bp,sizeof bp,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
     if(g_worker!=1 && g_helper>0){ /* the helper process builds it, low priority; its first draw then finds the binary on disk */
-      if(backend_file_exists(bp)){ g_mp_had++; if(mp.t && !warm_stage_peek(key)) ld_request(key); }   /* ready before its first draw, off the GL thread (a seed one: when the game loads it) */
+      if(backend_file_exists(bp)){ g_mp_had++; if(from_seed) seed_built_mark(seed_idx); else if(!warm_stage_peek(key)) ld_request(key); }   /* ready before its first draw, off the GL thread (a seed one: when the game loads it) */
       else if(backend_shader_helper_alive() && hp_job_worth(src)){ u32 sl=(u32)strlen(src), gt= stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER; u8* b=malloc((size_t)sl+20);
         if(b){ memcpy(b,"SWRJ",4); memcpy(b+4,&gt,4); memcpy(b+8,&sl,4); memcpy(b+12,src,sl); memcpy(b+12+sl,"SWRJOBOK",8);
-          char jp[200]; snprintf(jp,sizeof jp,"shader_cache/jobs/%016llx.pjob",(unsigned long long)key); aw_write(jp,b,(size_t)sl+20,0); free(b); pb_n++; g_hp_pre++; } }
+          char jp[200]; snprintf(jp,sizeof jp,"shader_cache/jobs/%016llx.pjob",(unsigned long long)key); aw_write(jp,b,(size_t)sl+20,0); free(b); pb_n++; g_hp_pre++; if(from_seed) seed_built_mark(seed_idx); } }
+      if(from_seed) seed_built_mark(seed_idx);   /* handled: built, sent to the helpers, or not worth a helper */
       g_mp_built++; free(src); continue; }
     WJob* j=calloc(1,sizeof *j); j->vs=src; j->own_vs=src; j->key=key; j->keep=1; j->sep=1; j->stype= stage==ST_VS? GL_VERTEX_SHADER : GL_FRAGMENT_SHADER;
     { FILE* t=fopen(bp,"rb"); if(t){ fclose(t); j->try_bin=1; snprintf(j->bin_path,sizeof j->bin_path,"%s",bp); g_mp_had++; } }   /* built before: the thread loads it */
@@ -5039,6 +5302,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     g_gbuf_max= !g_gles && sb[0]>=48 && sb[1]>=16 && sb[2]>=16? 16 : 8;
     LOG("OpenGL limits: storage buffers %d bindings (VS %d, FS %d, GS %d): up to %d per draw stage\n",sb[0],sb[1],sb[2],sb[3],g_gbuf_max); }
   if(g_verbose>=2){ typedef void (APIENTRY*DBGCB)(GLDEBUGPROC,const void*); DBGCB f=(DBGCB)backend_gl_proc("glDebugMessageCallback"); if(f){ glEnable(GL_DEBUG_OUTPUT); f(gl_dbg,NULL); } }
+  if(!g_gles) gl_perf_on();
   glGenFramebuffers(1,&g_fbo); glGenFramebuffers(1,&g_rfbo); glGenFramebuffers(1,&g_dfbo); glGenVertexArrays(1,&g_vao); glGenVertexArrays(1,&g_scratch_vao); glGenBuffers(32,g_vbuf); glGenBuffers(1,&g_ibuf);
   for(int s=0;s<5;s++) glGenBuffers(18,g_ubuf[s]);
   { GLuint a=compile(GL_VERTEX_SHADER,g_gles? BLIT_VS_ES : BLIT_VS,NULL,0), b=compile(GL_FRAGMENT_SHADER,g_gles? BLIT_FS_ES : BLIT_FS,NULL,0); g_blit_prog=link2(a,b,0); }

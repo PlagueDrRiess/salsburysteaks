@@ -21,6 +21,9 @@ static PMutex g_logm; static int g_logm_ok;
 static char *g_lq, *g_lq_out; static u32 g_lq_n; static u64 g_lq_dropped; static int g_lq_on;
 static PMutex g_logw; static PCond g_lq_cv;
 
+static void plat_copy_file(const char* from, const char* to){
+  FILE* a=fopen(from,"rb"); if(!a) return; FILE* b=fopen(to,"wb"); if(!b){ fclose(a); return; }
+  static char buf[1<<16]; size_t k; while((k=fread(buf,1,sizeof buf,a))>0) fwrite(buf,1,k,b); fclose(a); fclose(b); }
 static void log_emit(const char* q, u32 n){
   for(u32 at=0; at+4<=n;){ u32 h; memcpy(&h,q+at,4); at+=4; u32 L=h&0xFFFF, pre=(h>>16)&0x7FFF;
     if(!g_logf){ char p[1200], q[1220]; const char* n=g_exename[0]?g_exename:"switchrecomp";
@@ -29,7 +32,17 @@ static void log_emit(const char* q, u32 n){
       { char a[1220], b[1220]; snprintf(a,sizeof a,"%s%s.previous4.log",g_exedir,n); remove(a);
         for(int k=3;k>=1;k--){ if(k==1) snprintf(a,sizeof a,"%s%s.previous.log",g_exedir,n); else snprintf(a,sizeof a,"%s%s.previous%d.log",g_exedir,n,k);
           snprintf(b,sizeof b,"%s%s.previous%d.log",g_exedir,n,k+1); rename(a,b); } }
-      snprintf(p,sizeof p,"%s%s.log",g_exedir,n); snprintf(q,sizeof q,"%s%s.previous.log",g_exedir,n); rename(p,q);
+      snprintf(p,sizeof p,"%s%s.log",g_exedir,n); snprintf(q,sizeof q,"%s%s.previous.log",g_exedir,n);
+      { /* the last three played sessions are also kept as .lastplay.log .. .lastplay3.log: a run of automated tests
+           rotated every played session out of the five logs above before it could be looked at (2026-11-14). A log is
+           a played one when it has no "test input:" line (the replay harness writes one at the start) */
+        FILE* f=fopen(p,"rb"); int played=0;
+        if(f){ static char buf[1<<16]; size_t k=fread(buf,1,sizeof buf-1,f); buf[k]=0; fclose(f); played= k>0 && !strstr(buf,"test input:"); }
+        if(played){ char a[1220], b[1220]; snprintf(a,sizeof a,"%s%s.lastplay3.log",g_exedir,n); remove(a);
+          for(int k=2;k>=1;k--){ if(k==1) snprintf(a,sizeof a,"%s%s.lastplay.log",g_exedir,n); else snprintf(a,sizeof a,"%s%s.lastplay%d.log",g_exedir,n,k);
+            snprintf(b,sizeof b,"%s%s.lastplay%d.log",g_exedir,n,k+1); rename(a,b); }
+          snprintf(a,sizeof a,"%s%s.lastplay.log",g_exedir,n); plat_copy_file(p,a); } }
+      rename(p,q);
       g_logf=fopen(p,"w"); }
     if(g_logf) fwrite(q+at,1,L,g_logf);
     if(h>>31){ fwrite(q+at+pre,1,L-pre,stderr);

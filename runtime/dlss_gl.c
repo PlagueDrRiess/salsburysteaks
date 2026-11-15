@@ -55,7 +55,8 @@ static struct { HMODULE core; PFN_Init_Ext2 init; PFN_ReqExt req; PFN_GetParams 
   X(vkResetFences) X(vkResetCommandBuffer) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkQueueSubmit) X(vkCreateImage) \
   X(vkGetImageMemoryRequirements) X(vkAllocateMemory) X(vkBindImageMemory) X(vkGetMemoryWin32HandleKHR) X(vkCreateImageView) \
   X(vkCreateSemaphore) X(vkGetSemaphoreWin32HandleKHR) X(vkCmdPipelineBarrier) X(vkCmdClearColorImage) X(vkDestroyImage) \
-  X(vkDestroyImageView) X(vkFreeMemory) X(vkDeviceWaitIdle)
+  X(vkDestroyImageView) X(vkFreeMemory) X(vkDeviceWaitIdle) X(vkCreateQueryPool) X(vkCmdResetQueryPool) X(vkCmdWriteTimestamp) \
+  X(vkGetQueryPoolResults)
 #define VKDECL(n) static PFN_##n n;
 static PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr_; static PFN_vkCreateInstance vkCreateInstance_;
 VKI_FN(VKDECL) VKD_FN(VKDECL)
@@ -82,7 +83,13 @@ static struct { PFN_CMO cmo; PFN_MOPI mopi; PFN_IMW imw; PFN_TSM2 tsm2; PFN_GS g
 enum { IM_COLOR, IM_DEPTH, IM_MV, IM_OUT, IM_N };
 static struct {
   int tried, ok, failed;
-  VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; u32 qf; VkCommandPool pool; VkCommandBuffer cb[2]; VkFence fence[2]; u32 cur;
+  /* DL_RING command buffers in turn: the CPU waits only on the one from DL_RING frames back. With 2 it waited on the
+     frame before last every frame, so the CPU stood still until the GPU caught up: 10-50 ms a frame, while DLSS itself
+     took 0.5-0.7 ms on the GPU (2026-11-14). The shared images need no CPU wait: GL and Vulkan order them on the GPU
+     through s_ready and s_done */
+  #define DL_RING 4
+  VkInstance inst; VkPhysicalDevice pd; VkDevice dev; VkQueue q; u32 qf; VkCommandPool pool; VkCommandBuffer cb[DL_RING]; VkFence fence[DL_RING]; u32 cur;
+  VkQueryPool qp; float tsp; int qp_used[DL_RING]; u64 gpu_sum, gpu_max; u32 gpu_n;   /* DLSS's own GPU time (timestamps around the evaluation) */
   int kmt, dedicated;
   VkSemaphore s_ready, s_done; GLuint g_ready, g_done;
   u32 w, h; GLenum zfmt; int fresh;
@@ -160,10 +167,13 @@ static int vk_up(void){
   vkGetDeviceQueue(D.dev,D.qf,0,&D.q);
   VkCommandPoolCreateInfo cpi={VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,NULL,VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,D.qf};
   if(vkCreateCommandPool(D.dev,&cpi,NULL,&D.pool)!=VK_SUCCESS) return fail("command pool");
-  VkCommandBufferAllocateInfo cai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,NULL,D.pool,VK_COMMAND_BUFFER_LEVEL_PRIMARY,2};
+  VkCommandBufferAllocateInfo cai={VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,NULL,D.pool,VK_COMMAND_BUFFER_LEVEL_PRIMARY,DL_RING};
   if(vkAllocateCommandBuffers(D.dev,&cai,D.cb)!=VK_SUCCESS) return fail("command buffers");
   VkFenceCreateInfo fci={VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,NULL,VK_FENCE_CREATE_SIGNALED_BIT};
-  for(int i=0;i<2;i++) if(vkCreateFence(D.dev,&fci,NULL,&D.fence[i])!=VK_SUCCESS) return fail("fences");
+  for(int i=0;i<DL_RING;i++) if(vkCreateFence(D.dev,&fci,NULL,&D.fence[i])!=VK_SUCCESS) return fail("fences");
+  { VkQueryPoolCreateInfo qpi={VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,NULL,0,VK_QUERY_TYPE_TIMESTAMP,2*DL_RING,0};
+    VkPhysicalDeviceProperties2 pp={VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,NULL}; vkGetPhysicalDeviceProperties2(D.pd,&pp);
+    D.tsp=pp.properties.limits.timestampPeriod; if(vkCreateQueryPool(D.dev,&qpi,NULL,&D.qp)!=VK_SUCCESS) D.qp=VK_NULL_HANDLE; }   /* optional: timing only */
   /* NGX on this device */
   wchar_t wdir[1024]; MultiByteToWideChar(CP_UTF8,0,g_exedir,-1,wdir,1024);
   NgxResult r=ngx.init(231313132ull,wdir,D.inst,D.pd,D.dev,vkGetInstanceProcAddr_,vkGetDeviceProcAddr,0x15,NULL);
@@ -300,9 +310,13 @@ static void dl_run(const DlJob* j){
   gl.sig(D.g_ready,0,NULL,IM_N,D.gtex,lay);
   /* DLSS on Vulkan */
   u64 tp1=plat_ns();
-  u32 c=D.cur; D.cur^=1; VkCommandBuffer cb=D.cb[c];
+  u32 c=D.cur; D.cur=(D.cur+1)%DL_RING; VkCommandBuffer cb=D.cb[c];
   vkWaitForFences(D.dev,1,&D.fence[c],VK_TRUE,~0ull); u64 tp2=plat_ns(); vkResetFences(D.dev,1,&D.fence[c]); vkResetCommandBuffer(cb,0);
+  if(D.qp && D.qp_used[c]){ u64 ts[2]={0,0};   /* this command buffer's last DLSS evaluation, now finished */
+    if(vkGetQueryPoolResults(D.dev,D.qp,c*2,2,sizeof ts,ts,8,VK_QUERY_RESULT_64_BIT)==VK_SUCCESS && ts[1]>=ts[0]){
+      u64 g=(u64)((double)(ts[1]-ts[0])*D.tsp); D.gpu_sum+=g; if(g>D.gpu_max) D.gpu_max=g; D.gpu_n++; } }
   VkCommandBufferBeginInfo bi={VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,NULL,VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,NULL}; vkBeginCommandBuffer(cb,&bi);
+  if(D.qp) vkCmdResetQueryPool(cb,D.qp,c*2,2);
   barrier_all(cb,VK_IMAGE_LAYOUT_GENERAL);
   if(!j->have_mv){ VkClearColorValue z={{0,0,0,0}}; VkImageSubresourceRange all={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
     vkCmdClearColorImage(cb,D.img[IM_MV],VK_IMAGE_LAYOUT_GENERAL,&z,1,&all); barrier_all(cb,VK_IMAGE_LAYOUT_GENERAL); }
@@ -322,7 +336,9 @@ static void dl_run(const DlJob* j){
   p_setf(p,"MV.Scale.X",1.0f); p_setf(p,"MV.Scale.Y",1.0f);
   p_setu(p,"DLSS.Render.Subrect.Dimensions.Width",j->w); p_setu(p,"DLSS.Render.Subrect.Dimensions.Height",j->h);
   p_setf(p,"DLSS.Pre.Exposure",1.0f); p_setf(p,"DLSS.Exposure.Scale",1.0f); p_setf(p,"FrameTimeDeltaInMsec",16.67f);
+  if(D.qp) vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,D.qp,c*2);
   u64 tp3=plat_ns(); NgxResult r=ngx.eval(cb,D.feat,p,NULL); u64 tp4=plat_ns();
+  if(D.qp){ vkCmdWriteTimestamp(cb,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,D.qp,c*2+1); D.qp_used[c]=1; }
   barrier_all(cb,VK_IMAGE_LAYOUT_GENERAL);
   vkEndCommandBuffer(cb);
   VkPipelineStageFlags ws=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -347,6 +363,8 @@ static void dl_run(const DlJob* j){
     if(tp7-tp0>12000000ull){ static int said; if(said<40){ said++; LOG("dlaa (OpenGL): a %.1f ms step: copies %.1f, fence wait %.1f, eval %.1f, submit %.1f, GL wait %.1f, blit %.1f ms\n",(tp7-tp0)/1e6,ph[0]/1e6,ph[1]/1e6,ph[2]/1e6,ph[3]/1e6,ph[4]/1e6,ph[5]/1e6); } }
     if(g_dltn>=600){ LOG("dlaa (OpenGL): step averages over %llu frames (worst): copies %.2f (%.1f), fence wait %.2f (%.1f), eval %.2f (%.1f), submit %.2f (%.1f), GL wait %.2f (%.1f), blit %.2f (%.1f) ms\n",(unsigned long long)g_dltn,
         g_dlt[0]/1e6/g_dltn,g_dltmax[0]/1e6,g_dlt[1]/1e6/g_dltn,g_dltmax[1]/1e6,g_dlt[2]/1e6/g_dltn,g_dltmax[2]/1e6,g_dlt[3]/1e6/g_dltn,g_dltmax[3]/1e6,g_dlt[4]/1e6/g_dltn,g_dltmax[4]/1e6,g_dlt[5]/1e6/g_dltn,g_dltmax[5]/1e6);
+      if(D.gpu_n) LOG("dlaa (OpenGL): DLSS's own GPU time %.2f ms average, %.2f worst (%u frames)\n",D.gpu_sum/1e6/D.gpu_n,D.gpu_max/1e6,D.gpu_n);
+      D.gpu_sum=D.gpu_max=0; D.gpu_n=0;
       memset(g_dlt,0,sizeof g_dlt); memset(g_dltmax,0,sizeof g_dltmax); g_dltn=0; } }
   if(++D.evals==1 || D.evals%600==0) LOG("dlaa (OpenGL): %d frames, %ux%u, jitter %.3f %.3f, motion vectors %s\n",D.evals,j->w,j->h,j->jx,j->jy,j->have_mv? "yes" : "none");
 }

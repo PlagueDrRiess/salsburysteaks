@@ -572,6 +572,79 @@ void progress_bar(float frac, ImVec2 size, const char* text) {
     dl->AddText({p.x + size.x / 2 - ts.x / 2, p.y + size.y / 2 - ts.y / 2}, IM_COL32(255, 255, 255, 255), text);
 }
 
+#ifdef _WIN32
+// ---------------------------------------------------------------- keyboard and mouse bindings
+enum { BIND_MAX = 32 };
+static int bind_n() { return std::min(bind_count(), (int)BIND_MAX); }
+static void bind_load(BindUi& b, int c[][BIND_SLOTS]) { for (int i = 0; i < bind_n(); i++) bind_parse(b.get(i).c_str(), c[i]); }
+static void bind_save(BindUi& b, int i, int c[BIND_SLOTS]) {
+    if (!c[0] && c[1]) { c[0] = c[1]; c[1] = 0; }   // a lone binding sits in the first slot
+    char v[64]; bind_format(c, v, sizeof v); b.set(i, v);
+}
+static void bind_note(BindUi& b, int row, const std::string& s) { b.note_row = row; b.note = s; b.note_t = ImGui::GetTime(); }
+
+void bind_cancel(BindUi& b) { b.cap = -1; }
+
+void bind_take(BindUi& b, int code) {
+    if (b.cap < 0 || b.cap >= bind_n()) { b.cap = -1; return; }
+    int i = b.cap, s = b.cap_slot;
+    if (code == BIND_KEY_ESCAPE) { b.cap = -1; b.note_row = -1; return; }
+    int c[BIND_MAX][BIND_SLOTS]; bind_load(b, c);
+    if (code == BIND_KEY_BACK || code == BIND_KEY_DELETE) { c[i][s] = 0; bind_save(b, i, c[i]); b.cap = -1; b.note_row = -1; return; }
+    if (const char* why = bind_refused(code, b.ff)) { bind_note(b, i, why); return; }   // still waiting for another key
+    // a key bound elsewhere moves here: one key, one input
+    std::string from;
+    for (int j = 0; j < bind_n(); j++) for (int t = 0; t < BIND_SLOTS; t++)
+        if (c[j][t] == code && !(j == i && t == s)) { c[j][t] = 0; if (j != i) { bind_save(b, j, c[j]); from = bind_input_label(j); } }
+    c[i][s] = code; bind_save(b, i, c[i]);
+    b.cap = -1;
+    if (!from.empty()) bind_note(b, i, fmt("%s moved here from %s", bind_code_name(code), from.c_str())); else b.note_row = -1;
+}
+
+void bind_rows(BindUi& b) {
+    help_text("Select a row and press Enter, or click a box: the next key or mouse button you press is taken. Left / Right picks the "
+              "box, Esc cancels, Delete or Backspace clears it. Mouse 1 is the left button, 2 right, 3 middle, 4 back, 5 forward; "
+              "the mouse buttons work with Mouse look on. F1-F12, Esc and Alt stay hotkeys, and Esc is always Minus as well.");
+    int c[BIND_MAX][BIND_SLOTS]; bind_load(b, c);
+    double t = ImGui::GetTime();
+    if (b.note_row >= 0 && b.cap < 0 && t - b.note_t > 6) b.note_row = -1;
+    for (int i = 0; i < bind_n(); i++) {
+        ImRect r; bool f, clicked;
+        row_begin(fmt("##bind%d", i).c_str(), bind_input_label(i), bind_input_bit(i) == 11 ? "ALSO ESC" : nullptr, r, f, clicked);
+        bool hovered = ImGui::IsItemHovered(); ImVec2 mp = ImGui::GetIO().MousePos;
+        float bw = S(170), gap = S(10), x1 = r.Max.x - S(16), xs[BIND_SLOTS] = {x1 - bw * 2 - gap, x1 - bw};
+        if (f && b.cap < 0) { if (g_row.pad_left) b.slot = 0; if (g_row.pad_right) b.slot = 1; }
+        if (b.cap < 0 && (clicked || (f && g_row.confirm))) {
+            int s = b.slot;
+            if (clicked && hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) s = mp.x >= xs[1] - gap / 2 ? 1 : 0;   // the box clicked
+            b.slot = s; b.cap = i; b.cap_slot = s; b.note_row = -1;
+        }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        for (int s = 0; s < BIND_SLOTS; s++) {
+            ImVec2 a(xs[s], r.Min.y + S(8)), z(xs[s] + bw, r.Max.y - S(8));
+            bool waiting = b.cap == i && b.cap_slot == s, picked = f && b.cap < 0 && b.slot == s;
+            bool over = hovered && mp.x >= a.x && mp.x < z.x;
+            chamfer_rect(dl, a, z, S(5), waiting ? IM_COL32(150, 112, 255, 200) : IM_COL32(20, 36, 58, 255), waiting || picked ? C_CYAN : over ? C_CYAN_DIM : C_LINE, 1);
+            const char* name = bind_code_name(c[i][s]);
+            const char* txt = waiting ? "PRESS A KEY" : name ? name : "-";
+            ImU32 col = waiting ? IM_COL32(255, 255, 255, (int)(170 + 85 * sinf((float)t * 6))) : name ? C_TEXT : C_DIM;
+            ImVec2 ts = ImGui::CalcTextSize(txt);
+            dl->AddText({(a.x + z.x) / 2 - ts.x / 2, (a.y + z.y) / 2 - ts.y / 2}, col, txt);
+        }
+        // the note, right of the label: what happened, or how to leave the wait
+        std::string note = b.note_row == i ? b.note : b.cap == i ? "Esc cancels, Delete clears" : "";
+        if (!note.empty()) {
+            float fs = ImGui::GetFontSize() * 0.86f; ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, note.c_str());
+            dl->AddText(ImGui::GetFont(), fs, {xs[0] - S(14) - ts.x, r.Min.y + (r.GetHeight() - ts.y) / 2}, b.note_row == i ? C_WARN : C_DIM, note.c_str());
+        }
+    }
+    if (row_button("##bindreset", "Reset keyboard and mouse to the defaults", "RESET")) {
+        b.cap = -1; for (int i = 0; i < bind_n(); i++) b.set(i, bind_default(i));
+        bind_note(b, -1, "");
+    }
+}
+#endif
+
 // ---------------------------------------------------------------- resolution text
 float game_base_w(bool docked, const char* aspect) {
     (void)aspect; return docked ? 1600 : 1280;
@@ -635,7 +708,7 @@ static std::vector<Opt> build_options() {
 #endif
     B("show_fps", "Graphics", "Gameplay", "FPS counter", LIVE_YES, "0", "Shows the frames per second that reach the screen, in the top-left corner.");
     I("fov", "Gameplay", "Display", "Field of view", LIVE_YES, "100", 60, 160, 5, "Percent of the game's own field of view: higher shows more of the world. Applies while playing.");
-    B("cheats", "Gameplay", "Gameplay", "Cheat codes", LIVE_YES, "1", "Runs the cheats you turn on in the Cheats page (Atmosphere format files in the game's cheats folder).");
+    I("fov_lookahead", "Gameplay", "Display", "Edge look-ahead", LIVE_YES, "40", 0, 80, 5, "With a wider field of view: how much past the screen edges the game keeps level sections drawn, so less pops in. 0 = exactly the picture. Applies while playing.");    B("cheats", "Gameplay", "Gameplay", "Cheat codes", LIVE_YES, "1", "Runs the cheats you turn on in the Cheats page (Atmosphere format files in the game's cheats folder).");
     B("green_energy_10x", "Gameplay", "Gameplay", "Green Energy 10x", LIVE_YES, "0", "Less crystal grinding: Green Energy awards are worth 10 times as much (1 / 3 / 6 become 10 / 30 / 60). Energy you already have is not changed, and what you collect stays if you turn this off. After the mod by melos444 on GameBanana.");
     B("cheat_missiles", "Gameplay", "Gameplay", "Missiles don't decrease", LIVE_YES, "0", "Firing missiles doesn't use any. Not while using the Legacy Suit's missile shield.");
     B("cheat_super_shot", "Gameplay", "Gameplay", "Super shots don't decrease", LIVE_YES, "0", "Super shots don't use ammo.");

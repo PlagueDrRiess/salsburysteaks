@@ -138,6 +138,11 @@ static GLuint g_astc_prog, g_astc_buf[2]; static GLint g_astc_bi, g_astc_bo; sta
 static int astc_gpu_on(void){
   if(g_astc_gpu>=0) return g_astc_gpu; g_astc_gpu=0;
   if(g_gles || getenv("SWR_ASTC_CPU")) return 0;
+  { /* AMD's OpenGL driver: issue 16 (RX 9070 XT) crashed on one of the driver's own threads 30 ms after the first texture
+       loads, in the release that brought this decoder; its compile threads are already off (backend_win32.c). The CPU
+       path until an AMD card confirms this one. SWR_ASTC_GPU=1: on anyway */
+    const char* ven=(const char*)glGetString(GL_VENDOR);
+    if(ven && (strstr(ven,"ATI") || strstr(ven,"AMD")) && !getenv("SWR_ASTC_GPU")){ LOG("textures: AMD OpenGL driver: ASTC decoded on the CPU\n"); return 0; } }
   GLint mb=0; glGetIntegerv(0x90DD /* GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS */,&mb);
   if(mb<8){ LOG("textures: %d storage buffer bindings: ASTC decoded on the CPU\n",mb); return 0; }
   g_astc_bi=mb-2; g_astc_bo=mb-1;   /* the last two: the draws' own buffers use the low ones */

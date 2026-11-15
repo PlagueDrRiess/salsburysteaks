@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include "../keybind.h"
 
 namespace ui {
 
@@ -94,6 +95,21 @@ void background(ImDrawList* dl, ImVec2 a, ImVec2 b, float t, bool translucent);
 void logo(ImDrawList* dl, ImVec2 pos, float size, bool with_tag);
 void artifact(ImDrawList* dl, ImVec2 c, float r, float t, float speed = 1.0f);   // the turning crystal with its rings (our own drawing)
 void progress_bar(float frac, ImVec2 size, const char* text);
+
+// ---------------------------------------------------------------- keyboard and mouse bindings (Windows, both UIs)
+// One row per Switch input with its two slots. Enter, a controller's confirm or a click takes the next key or mouse button
+// for a slot (Left / Right picks the slot); the UI's window side sends that press to bind_take while cap >= 0.
+struct BindUi {
+    BindUi(std::function<std::string(int)> g, std::function<void(int, const std::string&)> s) : get(g), set(s) {}
+    std::function<std::string(int)> get;                    // input i's ini value (bind_default(i) when there is none)
+    std::function<void(int, const std::string&)> set;       // saves input i's ini value
+    bool ff = false;                                        // fast forward is on: Tab is its key
+    int cap = -1, cap_slot = 0, slot = 0;                   // the input waiting for a key (-1 none) and its slot; the slot Left / Right picked
+    int note_row = -1; std::string note; double note_t = 0; // a short note shown in a row (a binding moved, a hotkey refused)
+};
+void bind_rows(BindUi& b);
+void bind_take(BindUi& b, int code);   // a key or mouse button pressed while cap >= 0 (Esc cancels, Backspace / Delete clear)
+void bind_cancel(BindUi& b);
 
 // helpers
 std::string fmt(const char* f, ...);

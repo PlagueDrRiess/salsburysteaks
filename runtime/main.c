@@ -27,7 +27,8 @@ volatile float g_skip_hold;
 static void env_switch(const char* name, int on);
 int fps_overlay_rects(int W,int H,int (*r)[5],int max){
   static u64 t0;static u32 frames;static int fps=-1;
-  if(!g_opt_show_fps){t0=0;frames=0;fps=-1;return 0;}
+  extern volatile int g_fov_bisect; int bis=g_fov_bisect;   /* the F9 FOV test's step shows here as "tESt N" */
+  if(!g_opt_show_fps && !bis){t0=0;frames=0;fps=-1;return 0;}
   u64 now=plat_ns();if(!t0)t0=now;else frames++;
   if(now-t0>=500000000ull){fps=(int)(((u64)frames*2000000000ull/(now-t0)+1)/2);t0=now;frames=0;}
   static const u8 digit[10]={0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F};
@@ -35,6 +36,8 @@ int fps_overlay_rects(int W,int H,int (*r)[5],int max){
   if(fps<0)glyph[ng++]=0x40;
   else{char t[8];int k=snprintf(t,sizeof t,"%d",fps>999?999:fps);for(int i=0;i<k;i++)glyph[ng++]=digit[t[i]-'0'];}
   glyph[ng++]=0;glyph[ng++]=0x71;glyph[ng++]=0x73;glyph[ng++]=0x6D;   /* space F P S */
+  if(bis){ char t[8]; int k=snprintf(t,sizeof t,"%d",bis>99?99:bis); ng=0; glyph[ng++]=0x78; glyph[ng++]=0x79; glyph[ng++]=0x6D; glyph[ng++]=0x78; glyph[ng++]=0;
+    for(int i=0;i<k && ng<8;i++) glyph[ng++]=digit[t[i]-'0']; }
   float s=(float)H/1080.f;if(s<0.5f)s=0.5f;(void)W;
   int dh=(int)(26*s+0.5f),dw=(int)(14*s+0.5f),t=(int)(3*s+0.5f),gap=(int)(6*s+0.5f),pad=(int)(8*s+0.5f),x0=(int)(16*s+0.5f),y0=x0;
   if(t<2)t=2;
@@ -59,11 +62,10 @@ void fps_overlay_color(int kind, float c[3]){
   if(kind<0||kind>4) kind=0; c[0]=k[kind][0]; c[1]=k[kind][1]; c[2]=k[kind][2]; }
 int g_opt_audio_eos_sample_count=1;   /* always on (cinematic clock ~2x and cut music without it); SWR_AUDIO_OLD_EOS=1 = off, tests only */
 char g_opt_pad_map[128]="";   /* physical-position button remapping, empty = identity */
-int g_opt_ctrl_api=0, g_opt_ctrl_index=0, g_opt_deadzone=7000;
-char g_opt_button_icons[16]="auto";
+int g_opt_ctrl_api=0, g_opt_ctrl_index=0, g_opt_deadzone=7000;   /* [Input]: api 0 auto, 1 SDL2, 2 XInput */
+char g_opt_button_icons[16]="auto";   /* [Input] button_icons: auto, switch, xbox, ps4, ps5 (svc_fs.c romfs_apply_mods) */
 int g_opt_mouse_mode=0;   /* mouse_mode: 0 stick (right stick, dual stick scheme), 1 pointer (motion sensor, the game's Pointer scheme) */
 int g_opt_mouse_aim=1, g_opt_mouse_sens=100;   /* [Input] mouse free aim (backend_win32.c mouse_apply) */
-char g_opt_mouse_buttons[64]="zr,zl,r,-,-";   /* left, right, middle, back, forward -> Switch buttons */   /* [Input] button_icons: auto, switch, xbox, ps4, ps5 (svc_fs.c romfs_apply_mods) */   /* [Input]: api 0 auto, 1 SDL2, 2 XInput */
 int g_opt_diag=0;
 /* vsync: on by default off Windows. Without it the 60.00 FPS limiter beats against the display (59.95 Hz here): about once a
    second a frame came in the same refresh as the one before and the next refresh showed the old one again (59 of 3600
@@ -301,13 +303,16 @@ static const char* const INI_ALIAS[][2]={
 
 static const char* ini_norm(const char* k){ for(int i=0;INI_ALIAS[i][0];i++) if(!strcmp(k,INI_ALIAS[i][0])) return INI_ALIAS[i][1]; return k; }
 /* everything we read, so the rewrite keeps unknown keys */
-#define INI_MAXK 128
+#define INI_MAXK 192   /* about 120 known keys with the bindings, and room for others */
 static char g_ini_k[INI_MAXK][64], g_ini_v[INI_MAXK][1024]; static int g_ini_n;
 
 static void ini_store(const char* k, const char* v){ for(int i=0;i<g_ini_n;i++) if(!strcmp(g_ini_k[i],k)){ strncpy(g_ini_v[i],v,1023); return; }
   if(g_ini_n<INI_MAXK){ strncpy(g_ini_k[g_ini_n],k,63); strncpy(g_ini_v[g_ini_n],v,1023); g_ini_n++; } }
 
 static const char* ini_get(const char* k, const char* def){ for(int i=0;i<g_ini_n;i++) if(!strcmp(g_ini_k[i],k)) return g_ini_v[i]; return def; }
+/* a key that is gone for good: not written back */
+static void ini_unset(const char* k){ for(int i=0;i<g_ini_n;i++) if(!strcmp(g_ini_k[i],k)){
+    memmove(g_ini_k[i],g_ini_k[i+1],sizeof g_ini_k[0]*(size_t)(g_ini_n-i-1)); memmove(g_ini_v[i],g_ini_v[i+1],sizeof g_ini_v[0]*(size_t)(g_ini_n-i-1)); g_ini_n--; return; } }
 
 static void env_switch(const char* name, int on);
 static void ini_apply(const char* k, const char* v){
@@ -316,7 +321,11 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"mouse_aim")) g_opt_mouse_aim=atoi(v)!=0;
     else if(!strcmp(k,"mouse_mode")) g_opt_mouse_mode= !strcmp(v,"pointer");
     else if(!strcmp(k,"mouse_sensitivity")){ g_opt_mouse_sens=atoi(v); if(g_opt_mouse_sens<10) g_opt_mouse_sens=10; if(g_opt_mouse_sens>1000) g_opt_mouse_sens=1000; }
-    else if(!strcmp(k,"mouse_buttons")){ snprintf(g_opt_mouse_buttons,sizeof g_opt_mouse_buttons,"%s",strcmp(v,"y,l,r,-,-")? v : "zr,zl,r,-,-");   /* the old default (Metroid Dread's) moves to the new one */ extern void mouse_map_reset(void); mouse_map_reset(); }
+    else if(!strcmp(k,"mouse_buttons")){   /* replaced by the bind_ lines: an older .ini's mouse buttons move there, and the line goes */
+#ifdef _WIN32
+      bind_mouse_buttons_apply(v);
+#endif
+      ini_unset(k); }
     else if(!strcmp(k,"button_icons")) snprintf(g_opt_button_icons,sizeof g_opt_button_icons,"%s",v);
     else if(!strcmp(k,"controller_api")) g_opt_ctrl_api= !strcmp(v,"sdl")? 1 : !strcmp(v,"xinput")? 2 : 0;
     else if(!strcmp(k,"controller_index")){ g_opt_ctrl_index=atoi(v); if(g_opt_ctrl_index<0) g_opt_ctrl_index=0; }
@@ -375,7 +384,8 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"aspect")){ extern float g_opt_aspect; int aw=0,ah=0;   /* cheats.c aspect_tick, live */
       g_opt_aspect= !strcmp(v,"auto")? -1.0f : sscanf(v,"%d:%d",&aw,&ah)==2 && aw>0 && ah>0 && !(aw==16 && ah==9)? (float)aw/(float)ah : 0.0f; }
     else if(!strcmp(k,"fov")){ extern int g_opt_fov; g_opt_fov=atoi(v); if(g_opt_fov<60) g_opt_fov=60; if(g_opt_fov>160) g_opt_fov=160; }   /* cheats.c FOV hook, live */
-    else if(!strcmp(k,"anisotropy")){ g_opt_aniso=atoi(v); if(g_opt_aniso<0) g_opt_aniso=0; if(g_opt_aniso>16) g_opt_aniso=16; }
+    else if(!strcmp(k,"arm_cannon_large")){ extern int g_opt_arm_large; g_opt_arm_large=atoi(v)!=0; }   /* gpu_gl.c, live */
+    else if(!strcmp(k,"fov_lookahead")){ extern int g_opt_fov_look; g_opt_fov_look=atoi(v); if(g_opt_fov_look<0) g_opt_fov_look=0; if(g_opt_fov_look>80) g_opt_fov_look=80; }   /* cheats.c, live */    else if(!strcmp(k,"anisotropy")){ g_opt_aniso=atoi(v); if(g_opt_aniso<0) g_opt_aniso=0; if(g_opt_aniso>16) g_opt_aniso=16; }
     else if(!strcmp(k,"dlss")){ extern int snxvk_dlss_mode; snxvk_dlss_mode=atoi(v); }   /* native Vulkan: snxvk dlss.c; OpenGL: dlss_gl.c + gpu_gl.c dlg_* */
     else if(!strcmp(k,"texture_threads")){ g_opt_tex_threads=atoi(v); if(g_opt_tex_threads<0) g_opt_tex_threads=0; if(g_opt_tex_threads>16) g_opt_tex_threads=16; }
     else if(!strcmp(k,"fast_forward")) g_opt_ff=atoi(v);
@@ -439,12 +449,14 @@ static const IniOpt INI_PERF[]={
   {"cheat_flare_timer","0","1 = cheat: Freeze the Flare Pool escape timer (a hook of the GBAtemp code for this game build)"},
   {"cheat_crystals","0","1 = cheat: More green crystals (hold ZL while depositing) (a hook of the GBAtemp code for this game build)"},
   {"cheat_jumps","0","1 = cheat: Infinite jumps (a hook of the GBAtemp code for this game build)"},
-  {"cheat_ally_health","0","1 = cheat: Allies at full health (a hook of the GBAtemp code for this game build)"},
+  {"cheat_ally_health","0","retired: Allies at full health kept enemies from dying too (issue 14); ignored"},
   {"cheat_ally_dying","0","1 = cheat: Allies can't go down (a hook of the GBAtemp code for this game build)"},
   {"cheat_one_hit","0","1 = cheat: One-hit kills, bosses too (a hook of the GBAtemp code for this game build)"},
   {"cheat_two_hit","0","1 = cheat: Two-hit kills, not bosses (a hook of the GBAtemp code for this game build)"},
   {"green_energy_10x","0","1 = Green Energy awards are worth 10 times as much (after the mod by melos444)"},
   {"aspect","16:9","Picture shape: 16:9 (the game's own), 21:9, 32:9, 16:10, any W:H, or auto = the window's shape.\n;   Wider shapes show more to the sides; the HUD and menus are stretched with the picture for now. Applies live"},
+  {"arm_cannon_large","0","1 = with a wider field of view, draw the arm cannon at the game's own size (experimental: the\n;   barrel can look wrong while moving)"},
+  {"fov_lookahead","40","With a wider field of view, how much wider than the picture the game's level sections are kept\n;   (0-80%, applies live): less pops in at the edges, a little more to draw"},
   {"fov","100","Field of view in percent of the game's own (60-160, applies live). Built into the game code for v1.1.0;\n;   other builds need a FOV hook (beyond/fov_hooks.txt)"},
   {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Other values are treated as 60: the game advances one step per image, so 30 meant half speed and 144 2.4 times the speed. F4 changes it in game"},
   {"video_async_retire","0","1 = retire obsolete video pictures on a bounded worker (experimental; restart required)"},
@@ -478,16 +490,25 @@ static const IniOpt INI_FG[]={
   {NULL,NULL,NULL}};
 static const IniOpt INI_INPUT[]={
   {"controller_map","","16 comma-separated button destinations (0..15, -1 disabled); empty = default. Keyboard and sticks unchanged."},
-  {"mouse_aim","1","1 = mouse look: the mouse turns the camera (right stick), left click shoots (ZR), right click locks on (ZL),\n;   middle click fires the subweapon (R). The cursor hides and stays in the window while the game has focus"},
+  {"mouse_aim","1","1 = mouse look: the mouse turns the camera (right stick) and its buttons press what the bind_ lines below give\n;   them (left ZR, right ZL, middle R by default). The cursor hides and stays in the window while the game has focus"},
   {"mouse_mode","stick","stick = the mouse is the right stick (the game's Dual Stick scheme). pointer = the mouse is the controller's\n;   motion (choose the game's Pointer scheme in its Options, Controls)"},
   {"mouse_sensitivity","100","mouse look speed, in percent (10-1000)"},
-  {"mouse_buttons","zr,zl,r,-,-","mouse buttons left, right, middle, back, forward as Switch buttons: a b x y l r zl zr plus\n;   minus lstick rstick, - for none"},
-  {"button_icons","auto","the game's button pictures: auto = from the controller connected at start (Xbox and Steam Deck:\n;   Xbox icons, DualShock 4: PS4, DualSense: PS5, Switch or none: the originals), or switch, xbox, ps4, ps5.\n;   Needs the icon packs in Metroid Prime 4 Beyond_data\\mods (the Play screen downloads them: Controls > Button icons)"},
+  {"button_icons","auto","the game's button pictures: auto = from the controller connected at start (Xbox and Steam Deck:\n;   Xbox icons, DualShock 4: PS4, DualSense: PS5, Switch or none: the originals), or switch, xbox, ps4, ps5.\n;   Not in use yet: the icon packs it once loaded were for Metroid Dread and changed nothing in this game"},
   {"controller_api","auto","auto = SDL2 when SDL2.dll is next to the game (Bluetooth/USB Switch Pro, DualShock 4,\n;   DualSense, 8BitDo, Xbox...), else XInput. sdl or xinput to force one"},
   {"controller_index","0","0 = first connected controller, 1.. = that controller (in connection order) is player 1"},
   {"stick_deadzone","7000","stick dead zone (0..30000, out of 32767)"},
   {"rumble","100","controller rumble strength in percent (0 = off, up to 200): the game's HD rumble on the pad's two motors"},
   {NULL,NULL,NULL}};
+#ifdef _WIN32
+/* the bind_ lines after [Input]'s options (backend_win32.c has the list and the defaults) */
+static const char* const INI_BIND_HELP=
+  "Keyboard and mouse: bind_<Switch input>=up to two keys or mouse buttons, comma separated; empty = none, no line = the default.\n"
+  ";   Keys: A-Z, 0-9, Space, Enter, Backspace, Tab, Shift, Ctrl, CapsLock, Left, Up, Right, Down, Insert, Delete, Home, End,\n"
+  ";   PageUp, PageDown, Num0-Num9, F13-F24, Semicolon, Equals, Comma, Minus, Period, Slash, Backquote, LBracket, Backslash,\n"
+  ";   RBracket, Quote, or Key<Windows virtual-key code>. Mouse1 left, Mouse2 right, Mouse3 middle, Mouse4 back, Mouse5 forward\n"
+  ";   (with mouse_aim=1). F1-F12, Esc and Alt are hotkeys and can't be bound; Esc is always Minus as well. The Play screen and\n"
+  ";   the F1 menu change these (Controls). They replace mouse_buttons: an older mouse_buttons line moves into them on the next start";
+#endif
 static const IniOpt INI_AUDIO[]={
   {"volume","100","Master volume in percent (0-200, applies live)"},
   {NULL,NULL,NULL}};
@@ -523,7 +544,11 @@ static char g_ini_path[1400]; static u64 g_ini_mtime;
 
 static u64 file_mtime(const char* p){ struct stat st; if(stat(p,&st)) return 0; return (u64)st.st_mtime; }
 
-static int ini_known(const char* k){ for(int s=0;INI_SECS[s].title;s++) for(const IniOpt* o=INI_SECS[s].o;o->key;o++) if(!strcmp(o->key,k)) return 1; return 0; }
+static int ini_known(const char* k){ for(int s=0;INI_SECS[s].title;s++) for(const IniOpt* o=INI_SECS[s].o;o->key;o++) if(!strcmp(o->key,k)) return 1;
+#ifdef _WIN32
+  for(int i=0;i<bind_count();i++) if(!strcmp(bind_input_key(i),k)) return 1;
+#endif
+  return 0; }
 
 void ini_write(void){
   if(!g_ini_path[0]) return;
@@ -537,7 +562,11 @@ void ini_write(void){
   fprintf(f,"; =====================================================================\n");
   for(int s=0;INI_SECS[s].title;s++){
     fprintf(f,"\n[%s]\n",INI_SECS[s].title);
-    for(const IniOpt* o=INI_SECS[s].o;o->key;o++) fprintf(f,"; %s\n%s=%s\n",o->help,o->key,ini_get(o->key,o->def)); }
+    for(const IniOpt* o=INI_SECS[s].o;o->key;o++) fprintf(f,"; %s\n%s=%s\n",o->help,o->key,ini_get(o->key,o->def));
+#ifdef _WIN32
+    if(INI_SECS[s].o==INI_INPUT){ fprintf(f,"; %s\n",INI_BIND_HELP); for(int i=0;i<bind_count();i++) fprintf(f,"%s=%s\n",bind_input_key(i),ini_get(bind_input_key(i),bind_default(i))); }
+#endif
+  }
   int other=0; for(int i=0;i<g_ini_n;i++) if(!ini_known(g_ini_k[i])){ if(!other){ fprintf(f,"\n[Other]\n"); other=1; } fprintf(f,"%s=%s\n",g_ini_k[i],g_ini_v[i]); }
   fclose(f);
   remove(g_ini_path); if(rename(tmp,g_ini_path)) { remove(tmp); return; }

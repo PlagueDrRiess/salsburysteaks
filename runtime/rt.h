@@ -279,6 +279,7 @@ void video_present_rgba(const u32* px, int w, int h, int stride);   /* final RGB
 void video_poll(void);
 int  video_has_gl(void);
 void backend_ini(const char* k, const char* v);
+#include "keybind.h"   /* keyboard and mouse bindings */
 void frontend_frame(void);
 extern int g_frames;
 extern volatile u64 g_gpu_submits;

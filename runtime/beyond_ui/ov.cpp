@@ -25,6 +25,8 @@
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "ui.h"
+extern "C" int dk_devmode(void);     // developer tools: off in public builds (devkit_stub.c)
+extern "C" void dk_page_draw(void);
 
 extern "C" {
 void settings_queue(const char* k, const char* v);
@@ -46,7 +48,7 @@ void logf_(int lvl, const char* f, ...);
 using namespace ui;
 
 namespace {
-struct Ev { int type; int a; int b; float x, y; };   // 0 key(OVK_, down) 1 char 2 mouse pos 3 mouse button(btn, down) 4 wheel
+struct Ev { int type; int a; int b; float x, y; };   // 0 key(OVK_, down) 1 char 2 mouse pos 3 mouse button(btn, down) 4 wheel 5 a press to bind (keybind.h code)
 // platform-neutral keys the window side reports
 enum { OVK_UP = 1, OVK_DOWN, OVK_LEFT, OVK_RIGHT, OVK_ENTER, OVK_ESCAPE, OVK_TAB, OVK_PAGEUP, OVK_PAGEDOWN, OVK_SPACE, OVK_HOME, OVK_END };
 double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
@@ -59,6 +61,7 @@ struct Shared {
     std::map<std::string, std::string> vals;      // snapshot of the settings (main thread), updated by the menu
     int bind[NAV_COUNT] = {1, 0, 6, 7, 10}; bool nav_on = true; PromptStyle prompts = PROMPT_AUTO;
     bool pad_used = false; std::string renderer;
+    volatile bool capture = false;                // a key binding waits for a press: the window side sends the next one as it is
 } g_q;
 struct Lock { Lock() { g_q.m.lock(); } ~Lock() { g_q.m.unlock(); } };
 
@@ -80,6 +83,12 @@ void change(const char* k, const std::string& v) {
     g_vals[k] = v; settings_queue(k, v.c_str());
     Lock l; g_q.vals[k] = v;
 }
+#ifdef _WIN32
+// keyboard and mouse bindings (CONTROLS): the bind_ values, changed like any setting
+BindUi g_bind = {
+    [](int i) { auto it = g_vals.find(bind_input_key(i)); return it != g_vals.end() ? it->second : std::string(bind_default(i)); },
+    [](int i, const std::string& v) { change(bind_input_key(i), v); }};
+#endif
 bool is_display_key(const char* k) { return !strcmp(k, "resolution") || !strcmp(k, "fullscreen") || !strcmp(k, "dynamic_resolution") || !strcmp(k, "dynamic_resolution_min"); }
 void change_display(const char* k, const std::string& v) {
     if (!g_rev.active) { g_rev.old.clear(); for (const char* x : {"resolution", "fullscreen", "dynamic_resolution", "dynamic_resolution_min"}) g_rev.old.push_back({x, val(x)}); }
@@ -117,14 +126,14 @@ void tab_content(int t) {
     switch (t) {
     case 0: section("PICTURE"); opt_row("resolution"); opt_row("fullscreen"); opt_row("dynamic_resolution"); if (val("dynamic_resolution") == "1") opt_row("dynamic_resolution_min");
             opt_row("game_dynamic_resolution"); section("CONSOLE"); opt_row("docked"); opt_row("aspect"); opt_row("language");
-            section("FIELD OF VIEW"); opt_row("fov"); if (!fov_available()) help_text("No FOV hook for this game build yet: the slider has no effect until one is added to beyond/fov_hooks.txt."); break;
+            section("FIELD OF VIEW"); opt_row("fov"); opt_row("fov_lookahead"); if (!fov_available()) help_text("No FOV hook for this game build yet: the slider has no effect until one is added to beyond/fov_hooks.txt."); break;
     case 1: section("UPSCALING"); opt_row("resolution"); opt_row("upscaler"); if (val("upscaler") == "fsr") opt_row("fsr_sharpness");
             section("QUALITY"); opt_row("antialiasing"); opt_row("sharpening"); opt_row("shadows"); opt_row("anisotropy"); section("RENDERER"); opt_row("renderer"); opt_row("hdr"); break;
     case 2: section("FRAME RATE"); opt_row("fps_limit"); opt_row("forced_vsync"); opt_row("show_fps");
             section("RIDES"); opt_row("fast_forward"); if (val("fast_forward") == "1") opt_row("fast_forward_speed"); break;
     case 3: {
         section("CHEATS"); opt_row("cheats"); opt_row("green_energy_10x");
-        section("BUILT-IN CHEATS"); for (const char* k : {"cheat_missiles", "cheat_super_shot", "cheat_large_shot", "cheat_power_bombs", "cheat_ammo", "cheat_elemental_ammo", "cheat_arm_cannon", "cheat_crystals", "cheat_health", "cheat_jumps", "cheat_speed", "cheat_walls", "cheat_flare_timer", "cheat_one_hit", "cheat_two_hit", "cheat_ally_health", "cheat_ally_dying"}) opt_row(k);
+        section("BUILT-IN CHEATS"); for (const char* k : {"cheat_missiles", "cheat_super_shot", "cheat_large_shot", "cheat_power_bombs", "cheat_ammo", "cheat_elemental_ammo", "cheat_arm_cannon", "cheat_crystals", "cheat_health", "cheat_jumps", "cheat_speed", "cheat_walls", "cheat_flare_timer", "cheat_one_hit", "cheat_two_hit", "cheat_ally_dying"}) opt_row(k);   // cheat_ally_health retired (issue 14)
         section("CHEAT FILE");
         int n = cheats_count();
         if (!n) help_text(fmt("No cheats for this game build. Put an Atmosphere cheat file at %s and press Reload.", cheats_path()).c_str());
@@ -138,8 +147,12 @@ void tab_content(int t) {
         break; }
     case 4: section("OUTPUT"); opt_row("volume"); section("COMPATIBILITY"); opt_row("audio_surround_downmix"); break;
     case 5: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_mode"); opt_row("mouse_sensitivity");
-            section("CONTROLLER"); opt_row("button_icons"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
-            help_text("Button mapping and menu buttons are on the Play screen's Controls page."); break;
+            section("CONTROLLER"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
+            help_text("Button mapping and menu buttons are on the Play screen's Controls page.");
+#ifdef _WIN32
+            section("KEYBOARD AND MOUSE"); g_bind.ff = val("fast_forward") == "1"; bind_rows(g_bind);
+#endif
+            break;
     default: {
         section("KEYS");
         const char* kb[][2] = {{"Menu", "F1"}, {"Screenshot", "F3 (F8: full resolution PNG)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"},
@@ -148,7 +161,11 @@ void tab_content(int t) {
                                {"Vi-O-La on / off", "V"}, {"Vi-O-La: go / brake / boost / fire", "Left click / Shift / Space / E"},
                                {"Pick shot", "1 2 3 4"}, {"Game menu", "Esc or Tab"}, {"Menus: confirm / back", "Enter / Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
+#ifdef _WIN32
+        help_text("The game's keys and mouse buttons above are the defaults: CONTROLS, Keyboard and mouse changes them.");
+#endif
         section("ABOUT"); help_text("Metroid Prime 4 Recomp: Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; Dear ImGui; SDL2. Full credits on the Play screen.");
+        if (dk_devmode()) { section("DEVKIT"); dk_page_draw(); }
     } }
 }
 
@@ -217,6 +234,9 @@ void snapshot_settings() {   // main thread
     bindings_from_string(settings_get("launcher_bindings", "1,0,6,7,10"), g_q.bind);
     g_q.nav_on = strcmp(settings_get("launcher_nav", "1"), "0") != 0; g_q.prompts = prompt_style_from(settings_get("launcher_prompts", "auto"));
     g_q.renderer = settings_get("renderer", "opengl");
+#ifdef _WIN32
+    for (int i = 0; i < bind_count(); i++) g_q.vals[bind_input_key(i)] = settings_get(bind_input_key(i), bind_default(i));
+#endif
 }
 } // namespace
 
@@ -243,6 +263,10 @@ extern "C" int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l
     (void)h;
     if (m == WM_KEYDOWN && w == VK_F1 && !(l & (1 << 30))) { ov_input_toggle(); return 1; }
     if (!g_q.open) return 0;
+    if (g_q.capture) {   // a key binding waits: the next key or mouse button press goes to it, not to the menu
+        int code = bind_code_from_msg(m, w, l);
+        if (code) { if (code > 0) { Lock k; g_q.ev.push_back({5, code, 0, 0, 0}); } return 1; }
+    }
     switch (m) {
     case WM_KEYDOWN: case WM_SYSKEYDOWN: ov_input_key(ovk_from_vk(w), 1); return 1;
     case WM_KEYUP: case WM_SYSKEYUP: ov_input_key(ovk_from_vk(w), 0); return 1;
@@ -269,7 +293,7 @@ extern "C" int ov_pad(unsigned long long phys, int lx, int ly) {
     g_prev_phys = phys;
     if (toggle && g_snxvk_on) { if (g_backend_status) g_backend_status("The in-game menu needs the OpenGL renderer for now (Play screen > Graphics)"); toggle = false; }
     bool open;
-    { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else { g_q.open = false; logf_(1, "menu: closed by %s at frame %d\n", (pressed >> 30 & 1) ? "the Home button" : "F1 or the menu shortcut", g_frames); } } open = g_q.open; }
+    { Lock k; if (toggle) { if (!g_q.open) { g_q.m.unlock(); snapshot_settings(); g_q.m.lock(); g_q.open = true; g_q.capture = false; backend_release_keys(); logf_(1, "menu: opened at frame %d\n", g_frames); } else { g_q.open = false; logf_(1, "menu: closed by %s at frame %d\n", (pressed >> 30 & 1) ? "the Home button" : "F1 or the menu shortcut", g_frames); } } open = g_q.open; }
     if (open) {
         g_latch = true; g_open_seen = true;
         { Lock k; memcpy(g_nav.bind, g_q.bind, sizeof g_nav.bind); g_nav.enabled = g_q.nav_on; }
@@ -316,8 +340,18 @@ extern "C" void ov_gl_frame(void) {
         if (open && g_vals.empty()) g_vals = g_q.vals;
     }
     static bool was_open;
-    if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false; } return; }
-    if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; } }
+    if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false;
+#ifdef _WIN32
+            bind_cancel(g_bind); Lock k; g_q.capture = false;
+#endif
+        } return; }
+    if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; }
+#ifdef _WIN32
+        bind_cancel(g_bind);
+#endif
+        /* keys held when it last closed: their key-ups went to the game, so ImGui still had Escape down and its key
+           repeat closed every reopen in the same frame (2026-11-14) */
+        if (ImGui::GetCurrentContext()) ImGui::GetIO().ClearInputKeys(); }
     if (!g_ready) {
         IMGUI_CHECKVERSION(); ImGui::CreateContext(); ImGuiIO& io = ImGui::GetIO();
         io.IniFilename = nullptr; io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad; io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
@@ -344,18 +378,29 @@ extern "C" void ov_gl_frame(void) {
         case 2: io.AddMousePosEvent(e.x, e.y); break;
         case 3: io.AddMouseButtonEvent(e.a, e.b != 0); break;
         case 4: io.AddMouseWheelEvent(0, e.y); break;
+#ifdef _WIN32
+        case 5: bind_take(g_bind, e.a); break;
+#endif
         }
     }
     float sc = std::max(0.55f, std::min(2.2f, std::min(h / 1080.0f, w / 1700.0f))); if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
     nav_frame_begin();
+#ifdef _WIN32
+    if (g_bind.cap >= 0 && g_tab != 5) bind_cancel(g_bind);
+    if (g_bind.cap >= 0 && (up || down || left || right || std::any_of(act, act + NAV_COUNT, [](bool a) { return a; }))) {   // a controller press cancels a key binding's wait
+        bind_cancel(g_bind); up = down = left = right = false; memset(act, 0, sizeof act); }
+#endif
     g_row.pad_left = left || ImGui::IsKeyPressed(ImGuiKey_LeftArrow); g_row.pad_right = right || ImGui::IsKeyPressed(ImGuiKey_RightArrow); g_row.confirm = act[NAV_CONFIRM];
     if (g_rev.active && act[NAV_CONFIRM]) { g_rev.active = false; g_row.confirm = false; }   // "Keep these display settings?": confirm keeps
-    bool close = act[NAV_BACK] || ImGui::IsKeyPressed(ImGuiKey_Escape);
+    bool close = act[NAV_BACK] || ImGui::IsKeyPressed(ImGuiKey_Escape, false);   /* a fresh press, not a held key's repeat */
     if (close) { if (g_rev.active) revert_display(); else { Lock k; g_q.open = false; } logf_(1, "menu: closed by %s at frame %d\n", act[NAV_BACK] ? "the controller's back button" : "Escape", g_frames); }
     if (act[NAV_PREV] || ImGui::IsKeyPressed(ImGuiKey_PageUp)) { g_tab = (g_tab + NTABS - 1) % NTABS; g_tab_changed = true; }
     if (act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) { g_tab = (g_tab + 1) % NTABS; g_tab_changed = true; }
     draw_menu((float)w, (float)h, ImGui::GetTime());
+#ifdef _WIN32
+    { Lock k; g_q.capture = g_bind.cap >= 0; }
+#endif
     if (!g_rev.active) nav_move(down ? 1 : up ? -1 : 0);   // controller up/down (keyboard arrows use ImGui's own nav)
     visor_cursor(ImGui::GetTime());
     ImGui::Render();

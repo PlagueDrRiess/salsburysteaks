@@ -17,7 +17,7 @@ static HWND g_hwnd; static HDC g_hdc, g_wdc[8]; static HGLRC g_ctx, g_wctx[8]; s
    (backend_x11.c). One context left new areas compiling hundreds of shaders at their first draw. [Performance] shader_threads */
 int g_opt_shader_threads;
 static HWND g_glwnd; static int g_want_vk;   /* renderer=vulkan: GL renders on the hidden g_glwnd, Vulkan presents on g_hwnd */
-static volatile int g_ww=1280, g_wh=720; static u64 keys_held,keys_tapped;static int test_tap_sample; static int g_fullscreen=0, g_want_fs=1;
+static volatile int g_ww=1280, g_wh=720; static u64 keys_down[4],keys_tapped;static int test_tap_sample; static int g_fullscreen=0, g_want_fs=1;
 static WINDOWPLACEMENT g_wp={sizeof(WINDOWPLACEMENT)};
 static int g_seconds=0; static char g_shot[1024]; static u64 g_start; static volatile int g_shot_req;
 static char g_script[8192];
@@ -34,9 +34,11 @@ extern int g_opt_fps;
 static int g_ls_mode=0; static char g_ls_path[1024];
 
 extern void discord_ini(const char* k, const char* v); extern void discord_start(void);   /* discord_win32.c */
+static void bind_ini(const char* k, const char* v);
 void backend_ini(const char* k, const char* v){
   discord_ini(k,v);
-  if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
+  if(!strncmp(k,"bind_",5)) bind_ini(k,v);   /* keyboard and mouse bindings */
+  else if(!strcmp(k,"fullscreen")) g_want_fs=atoi(v);
   else if(!strcmp(k,"lossless_scaling")) g_ls_mode=atoi(v);
   else if(!strcmp(k,"lossless_path")) strncpy(g_ls_path,v,1023);
   else if(!strcmp(k,"seconds")) g_seconds=atoi(v);
@@ -208,7 +210,7 @@ static void set_fullscreen(int on){
 void backend_fe_fullscreen(int on){ if((on!=0)==(g_fullscreen!=0)) return; set_fullscreen(on); if(on) ShowCursor(TRUE); }
 void backend_set_fullscreen(int on){ if(g_hwnd) PostMessageA(g_hwnd,WM_APP+11,(WPARAM)(on!=0),0); }
 int backend_is_fullscreen(void){ return g_fullscreen; }
-void backend_release_keys(void){ keys_held=0; keys_tapped=0; }
+void backend_release_keys(void){ memset(keys_down,0,sizeof keys_down); keys_tapped=0; }
 void backend_request_quit(void){ if(g_hwnd) PostMessageA(g_hwnd,WM_CLOSE,0,0); }   /* the in-game menu's Quit */
 void* backend_hwnd(void){ return g_hwnd; }
 
@@ -262,18 +264,136 @@ static const char* HELP=
   "F8 = instant full-resolution screenshot (PNG in the captures folder)\n"
   "F11 / Alt+Enter = fullscreen   Esc = quit";
 
-static u64 keymap(WPARAM k){
-  /* PC shooter layout for Prime 4's dual stick scheme: bits 0 A, 1 B, 2 X, 3 Y, 7 R, 10 plus, 11 minus, 12-15 D-pad.
-     Jump B, interact A, morph ball Y, visors X, subweapon R, Vi-O-La plus, menu minus; 1-4 pick the shots on the D-pad */
-  switch(k){ case 'E': case VK_RETURN: return 1ull<<0; case VK_SPACE: case VK_BACK: return 1ull<<1;
-    case 'Q': return 1ull<<2; case VK_CONTROL: case 'C': return 1ull<<3; case 'F': return 1ull<<7; case 'R': return 1ull<<4; case 'T': return 1ull<<5; case VK_SHIFT: return 1ull<<6;   /* R stick click, L (Vi-O-La brake, jump) */
-    case 'V': return 1ull<<10; case VK_ESCAPE: case VK_TAB: return 1ull<<11;
-    case VK_LEFT: case '2': return 1ull<<12; case VK_UP: case '1': return 1ull<<13; case VK_RIGHT: case '3': return 1ull<<14; case VK_DOWN: case '4': return 1ull<<15;
-    /* stick keys, turned into axes later */
-    case 'A': return 1ull<<40; case 'W': return 1ull<<41; case 'D': return 1ull<<42; case 'S': return 1ull<<43;
-    case 'J': return 1ull<<44; case 'I': return 1ull<<45; case 'L': return 1ull<<46; case 'K': return 1ull<<47;
-    case 'G': return 1ull<<48; }   /* lasso pull (video_poll) */
+/* ---------------------------------------------------------------- keyboard and mouse bindings (keybind.h)
+   Each Switch input takes up to two keys or mouse buttons, bind_<input> in the [Input] section, changed on the Play
+   screen and in the F1 menu (Controls). The defaults are the PC shooter layout for Prime 4's dual stick scheme. Held keys
+   are kept as virtual keys and looked up at each poll (g_bind_key, rebuilt when a binding changes), so a key rebound
+   while held still lets go of what it pressed. Bits: 0-15 the Switch buttons, 40-47 stick directions (turned into
+   axes in video_poll), 48 the lasso key (video_poll) */
+typedef struct { const char* key; const char* label; int bit; int def[BIND_SLOTS]; } BindInput;
+static const BindInput BIND_IN[]={
+  {"bind_a","A",0,{'E',VK_RETURN}}, {"bind_b","B",1,{VK_SPACE,VK_BACK}}, {"bind_x","X",2,{'Q',0}}, {"bind_y","Y",3,{VK_CONTROL,'C'}},
+  {"bind_l","L",6,{VK_SHIFT,0}}, {"bind_r","R",7,{'F',BIND_MOUSE+2}}, {"bind_zl","ZL",8,{BIND_MOUSE+1,0}}, {"bind_zr","ZR",9,{BIND_MOUSE+0,0}},
+  {"bind_plus","Plus",10,{'V',0}}, {"bind_minus","Minus",11,{VK_TAB,0}},   /* and Esc, always (bind_rebuild) */
+  {"bind_lstick","L-stick click",4,{'R',0}}, {"bind_rstick","R-stick click",5,{'T',0}},
+  {"bind_dpad_up","D-pad up",13,{VK_UP,'1'}}, {"bind_dpad_down","D-pad down",15,{VK_DOWN,'4'}},
+  {"bind_dpad_left","D-pad left",12,{VK_LEFT,'2'}}, {"bind_dpad_right","D-pad right",14,{VK_RIGHT,'3'}},
+  {"bind_lstick_up","Left stick up",41,{'W',0}}, {"bind_lstick_down","Left stick down",43,{'S',0}},
+  {"bind_lstick_left","Left stick left",40,{'A',0}}, {"bind_lstick_right","Left stick right",42,{'D',0}},
+  {"bind_rstick_up","Right stick up",45,{'I',0}}, {"bind_rstick_down","Right stick down",47,{'K',0}},
+  {"bind_rstick_left","Right stick left",44,{'J',0}}, {"bind_rstick_right","Right stick right",46,{'L',0}},
+  {"bind_lasso","Lasso (L-stick click, hold: pull up)",48,{'G',0}}};
+#define BIND_N ((int)(sizeof BIND_IN/sizeof *BIND_IN))
+/* names: the ini's (no spaces, no commas) and the one shown; keys not listed are Key<code> */
+static const struct { int vk; const char* ini; const char* show; } BIND_KEYS[]={
+  {VK_BACK,"Backspace","Backspace"},{VK_TAB,"Tab","Tab"},{VK_RETURN,"Enter","Enter"},{VK_SHIFT,"Shift","Shift"},{VK_CONTROL,"Ctrl","Ctrl"},
+  {VK_MENU,"Alt","Alt"},{VK_PAUSE,"Pause","Pause"},{VK_CAPITAL,"CapsLock","Caps Lock"},{VK_ESCAPE,"Escape","Esc"},{VK_SPACE,"Space","Space"},
+  {VK_PRIOR,"PageUp","Page Up"},{VK_NEXT,"PageDown","Page Down"},{VK_END,"End","End"},{VK_HOME,"Home","Home"},{VK_LEFT,"Left","Left"},
+  {VK_UP,"Up","Up"},{VK_RIGHT,"Right","Right"},{VK_DOWN,"Down","Down"},{VK_INSERT,"Insert","Insert"},{VK_DELETE,"Delete","Delete"},
+  {VK_LWIN,"LWin","Win"},{VK_RWIN,"RWin","Win"},{VK_APPS,"Apps","Menu key"},{VK_MULTIPLY,"Num*","Num *"},{VK_ADD,"Num+","Num +"},
+  {VK_SUBTRACT,"Num-","Num -"},{VK_DECIMAL,"Num.","Num ."},{VK_DIVIDE,"Num/","Num /"},{VK_NUMLOCK,"NumLock","Num Lock"},
+  {VK_SCROLL,"ScrollLock","Scroll Lock"},{VK_OEM_1,"Semicolon",";"},{VK_OEM_PLUS,"Equals","="},{VK_OEM_COMMA,"Comma",","},
+  {VK_OEM_MINUS,"Minus","-"},{VK_OEM_PERIOD,"Period","."},{VK_OEM_2,"Slash","/"},{VK_OEM_3,"Backquote","`"},{VK_OEM_4,"LBracket","["},
+  {VK_OEM_5,"Backslash","\\"},{VK_OEM_6,"RBracket","]"},{VK_OEM_7,"Quote","'"},{VK_OEM_102,"OEM102","<"}};
+static int g_bind[BIND_N][BIND_SLOTS];
+static volatile u64 g_bind_key[256], g_bind_mouse[5];   /* virtual key / mouse button -> the input bits it presses */
+static char g_bind_ini[BIND_MOUSE+5][16], g_bind_show[BIND_MOUSE+5][16], g_bind_def[BIND_N][40];
+static volatile int g_bind_ready;
+
+const char* bind_refused(int code, int fast_forward){
+  if(code>=BIND_MOUSE && code<BIND_MOUSE+5) return NULL;
+  if(code<=0 || code>=255) return "That key can't be bound";
+  if(code>=VK_F1 && code<=VK_F12) return "F1 to F12 are hotkeys";
+  if(code==VK_ESCAPE) return "Esc is the menu key";
+  if(code==VK_MENU) return "Alt is for Alt+Enter and Alt+F4";
+  if(code==VK_LWIN || code==VK_RWIN) return "The Windows key can't be bound";
+  if(code==VK_TAB && fast_forward) return "Tab is fast forward while that is on";
+  return NULL; }
+static int bind_code_of(const char* t){
+  static const struct { const char* n; int vk; } AKA[]={{"Esc",VK_ESCAPE},{"Control",VK_CONTROL},{"Return",VK_RETURN}};
+  for(int c=1;c<BIND_MOUSE+5;c++) if(g_bind_ini[c][0] && !_stricmp(t,g_bind_ini[c])) return c;
+  for(size_t i=0;i<sizeof AKA/sizeof *AKA;i++) if(!_stricmp(t,AKA[i].n)) return AKA[i].vk;
   return 0; }
+/* key: the ini key, to log what is left out (the menus parse every frame: quiet) */
+static int bind_parse_(const char* v, int c[BIND_SLOTS], const char* key){
+  int n=0; for(int s=0;s<BIND_SLOTS;s++) c[s]=0;
+  while(v && *v){ char t[32]; int k=0;
+    while(*v && *v!=','){ if(*v!=' ' && *v!='\t' && k<31) t[k++]=*v; v++; }   /* "Page Up" is PageUp */
+    t[k]=0; if(*v==',') v++;
+    if(!t[0] || !strcmp(t,"-") || !_stricmp(t,"none")) continue;
+    int code=bind_code_of(t); const char* why= code? bind_refused(code,0) : "not a key name";
+    if(why){ if(key) LOG("input: %s: %s left out (%s)\n",key,t,why); continue; }
+    if(n && c[0]==code) continue;
+    if(n==BIND_SLOTS){ if(key) LOG("input: %s: %s left out (two keys at most)\n",key,t); continue; }
+    c[n++]=code; }
+  return n; }
+static void bind_fmt_(const int c[BIND_SLOTS], char* out, int cap){
+  int n=0; if(cap>0) out[0]=0;
+  for(int s=0;s<BIND_SLOTS;s++) if(c[s]>0 && c[s]<BIND_MOUSE+5 && n<cap) n+=snprintf(out+n,(size_t)(cap-n),"%s%s",n? "," : "",g_bind_ini[c[s]]); }
+static void bind_rebuild(void){
+  u64 key[256]={0}, mouse[5]={0};
+  for(int i=0;i<BIND_N;i++) for(int s=0;s<BIND_SLOTS;s++){ int c=g_bind[i][s]; u64 m=1ull<<BIND_IN[i].bit;
+    if(c>0 && c<256) key[c]|=m; else if(c>=BIND_MOUSE && c<BIND_MOUSE+5) mouse[c-BIND_MOUSE]|=m; }
+  key[VK_ESCAPE]|=1ull<<11;   /* Esc is always Minus (the game's menu): a hotkey, not bindable */
+  for(int i=0;i<256;i++) g_bind_key[i]=key[i];
+  for(int i=0;i<5;i++) g_bind_mouse[i]=mouse[i]; }
+static void bind_init(void){
+  if(g_bind_ready) return;
+  for(int c=1;c<BIND_MOUSE+5;c++){ char* n=g_bind_ini[c]; char* s=g_bind_show[c];
+    if(c>=BIND_MOUSE){ snprintf(n,16,"Mouse%d",c-BIND_MOUSE+1); snprintf(s,16,"Mouse %d",c-BIND_MOUSE+1); }
+    else if((c>='A' && c<='Z') || (c>='0' && c<='9')){ snprintf(n,16,"%c",c); snprintf(s,16,"%c",c); }
+    else if(c>=VK_NUMPAD0 && c<=VK_NUMPAD9){ snprintf(n,16,"Num%d",c-VK_NUMPAD0); snprintf(s,16,"Num %d",c-VK_NUMPAD0); }
+    else if(c>=VK_F1 && c<=VK_F24){ snprintf(n,16,"F%d",c-VK_F1+1); snprintf(s,16,"F%d",c-VK_F1+1); }
+    else if(c<256){ snprintf(n,16,"Key%d",c); snprintf(s,16,"Key %d",c); } }
+  for(size_t j=0;j<sizeof BIND_KEYS/sizeof *BIND_KEYS;j++){ int c=BIND_KEYS[j].vk;
+    snprintf(g_bind_ini[c],16,"%s",BIND_KEYS[j].ini); snprintf(g_bind_show[c],16,"%s",BIND_KEYS[j].show);
+    if(c>=VK_OEM_1){ UINT ch=MapVirtualKeyA((UINT)c,MAPVK_VK_TO_CHAR)&0x7FFF; if(ch>0x20 && ch<0x7F) snprintf(g_bind_show[c],16,"%c",(char)ch); } }   /* what this keyboard layout prints on it */
+  for(int i=0;i<BIND_N;i++){ for(int s=0;s<BIND_SLOTS;s++) g_bind[i][s]=BIND_IN[i].def[s]; bind_fmt_(BIND_IN[i].def,g_bind_def[i],sizeof g_bind_def[i]); }
+  bind_rebuild(); g_bind_ready=1; }
+
+int bind_count(void){ return BIND_N; }
+const char* bind_input_key(int i){ return i>=0 && i<BIND_N? BIND_IN[i].key : NULL; }
+const char* bind_input_label(int i){ return i>=0 && i<BIND_N? BIND_IN[i].label : NULL; }
+int bind_input_bit(int i){ return i>=0 && i<BIND_N? BIND_IN[i].bit : -1; }
+const char* bind_default(int i){ bind_init(); return i>=0 && i<BIND_N? g_bind_def[i] : ""; }
+int bind_parse(const char* v, int c[BIND_SLOTS]){ bind_init(); return bind_parse_(v,c,NULL); }
+void bind_format(const int c[BIND_SLOTS], char* out, int cap){ bind_init(); bind_fmt_(c,out,cap); }
+const char* bind_code_name(int code){ bind_init(); return code>0 && code<BIND_MOUSE+5 && g_bind_show[code][0]? g_bind_show[code] : NULL; }
+const char* bind_key_name(int bit, int slot){ bind_init();
+  if(slot<0 || slot>=BIND_SLOTS) return NULL;
+  for(int i=0;i<BIND_N;i++) if(BIND_IN[i].bit==bit) return bind_code_name(g_bind[i][slot]);
+  return NULL; }
+int bind_code_from_msg(unsigned m, unsigned long long w, long long l){
+  if(m==WM_KEYDOWN || m==WM_SYSKEYDOWN) return (l & (1LL<<30)) || w==0 || w>255? -1 : (int)w;
+  switch(m){ case WM_LBUTTONDOWN: return BIND_MOUSE; case WM_RBUTTONDOWN: return BIND_MOUSE+1; case WM_MBUTTONDOWN: return BIND_MOUSE+2;
+    case WM_XBUTTONDOWN: return HIWORD(w)==XBUTTON1? BIND_MOUSE+3 : BIND_MOUSE+4; }
+  return 0; }
+/* [Input] bind_<input>: a missing line keeps the default */
+static void bind_ini(const char* k, const char* v){ bind_init();
+  for(int i=0;i<BIND_N;i++) if(!strcmp(k,BIND_IN[i].key)){ bind_parse_(v,g_bind[i],k); bind_rebuild(); } }
+/* mouse_buttons, the older option: Switch button names for the left, right, middle, back and forward mouse buttons.
+   Anything but its default replaces the mouse buttons of every input; one with two keys already loses its second */
+int bind_mouse_buttons(int i, const char* mb, const char* value, char* out, int cap){
+  static const struct { const char* n; int bit; } N[]={{"a",0},{"b",1},{"x",2},{"y",3},{"lstick",4},{"rstick",5},{"l",6},{"r",7},
+    {"zl",8},{"zr",9},{"plus",10},{"minus",11}};
+  bind_init();
+  if(i<0 || i>=BIND_N || !mb || !*mb || !strcmp(mb,"zr,zl,r,-,-") || !strcmp(mb,"y,l,r,-,-")) return 0;   /* the default, and Metroid Dread's old one */
+  int c[BIND_SLOTS], k[BIND_SLOTS]={0}, n=0; bind_parse_(value,c,NULL);
+  for(int s=0;s<BIND_SLOTS;s++) if(c[s] && c[s]<BIND_MOUSE) k[n++]=c[s];
+  const char* p=mb;
+  for(int j=0;j<5;j++){ char t[16]; int q=0; while(*p==' ') p++; while(*p && *p!=',' && q<15) t[q++]=(char)tolower((unsigned char)*p++); t[q]=0; if(*p==',') p++;
+    for(size_t m=0;m<sizeof N/sizeof *N;m++) if(!strcmp(t,N[m].n) && N[m].bit==BIND_IN[i].bit){ if(n<BIND_SLOTS) k[n++]=BIND_MOUSE+j; else k[BIND_SLOTS-1]=BIND_MOUSE+j; } }
+  bind_fmt_(k,out,cap); return 1; }
+void bind_mouse_buttons_apply(const char* mb){
+  extern void ini_set(const char*, const char*); int moved=0; bind_init();
+  for(int i=0;i<BIND_N;i++){ char cur[40], nv[40]; bind_fmt_(g_bind[i],cur,sizeof cur);
+    if(bind_mouse_buttons(i,mb,cur,nv,sizeof nv) && strcmp(cur,nv)){ bind_parse_(nv,g_bind[i],NULL); ini_set(BIND_IN[i].key,nv); moved=1; } }
+  if(moved){ bind_rebuild(); LOG("input: mouse_buttons=%s moved into the bind_ lines of the .ini\n",mb); } }
+static u64 keymap(WPARAM k){ return k<256? g_bind_key[k] : 0; }
+/* the bindings of the keys held now (keys_down: a bit per virtual key) */
+static u64 keys_bits(void){ u64 k=0;
+  for(int w=0;w<4;w++){ u64 m=keys_down[w]; while(m){ k|=g_bind_key[w*64+__builtin_ctzll(m)]; m&=m-1; } }
+  return k; }
 
 extern int fe_wndproc(void* h, unsigned m, unsigned long long w, long long l, long long* result);   /* beyond_ui/fe.cpp */
 extern int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l);   /* beyond_ui/ov.cpp: 1 = the menu took it */
@@ -301,14 +421,22 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
     if(0){ MessageBoxA(h,HELP,"Metroid Prime 4 Beyond",MB_OK); }
     if(w==VK_F3){ g_shot_req=1; return 0; }
     if(w==VK_F2){ if(l & (1L<<30)) return 0; extern int g_opt_show_fps; g_opt_show_fps=!g_opt_show_fps; LOG("settings: F2 FPS counter %s\n",g_opt_show_fps? "on" : "off"); return 0; }
+    { extern int dk_devmode(void); if((w==VK_F7 || w==VK_F9) && !dk_devmode()) return 0; }   /* diagnostics: developer builds only (devkit_stub.c leaves them off) */
     if(w==VK_F7){ g_rec_toggle=1; return 0; }
+    if(w==VK_F9){ if(l & (1L<<30)) return 0;   /* FOV test: which tan site to leave at the game's angle (cheats.c) */
+      extern volatile int g_fov_bisect, g_fov_tan_n; extern volatile unsigned long long g_fov_tan_site[64];
+      int n=g_fov_tan_n; g_fov_bisect= g_fov_bisect+1>n+1? 0 : g_fov_bisect+1; char t[96];
+      if(!g_fov_bisect) snprintf(t,sizeof t,"FOV test: off (every site widened)");
+      else if(g_fov_bisect==1) snprintf(t,sizeof t,"FOV test: every tan site at the game's angle");
+      else snprintf(t,sizeof t,"FOV test %d of %d: tan site main+%llx at the game's angle",g_fov_bisect-1,n,(unsigned long long)g_fov_tan_site[g_fov_bisect-2]);
+      SetWindowTextA(h,t); LOG("%s\n",t); return 0; }
     { extern int g_opt_ff; if(w==VK_TAB && g_opt_ff){ if(!(l & (1L<<30))){ extern volatile int g_ff_presses; g_ff_presses++; } return 0; } }   /* fast forward toggle (fast_forward=1); else Tab is the menu */
     if(w==VK_F8){ extern volatile int g_shot8_req, g_vkcap_req; g_shot8_req=1; g_vkcap_req=1; return 0; }   /* the second: Native Vulkan's capture */
     if(w==VK_F5){ extern volatile int g_vkcap_req; capture_hotkey(); g_vkcap_req=2; return 0; }
     if(w==VK_F4){ if(l & (1L<<30)) return 0; g_opt_fps= g_opt_fps==0? 1 : 0; char t[64]; snprintf(t,sizeof t,"FPS limit: %s",g_opt_fps==0? "unlimited" : "60"); SetWindowTextA(h,t); LOG("settings: F4 fps_limit=%d\n",g_opt_fps); { extern void ini_set(const char*, const char*); char v[8]; snprintf(v,sizeof v,"%d",g_opt_fps); ini_set("fps_limit",v); } return 0; }
-    keys_held|=keymap(w);if(test_tap_sample)keys_tapped|=keymap(w); return 0;
-  case WM_SYSKEYUP: case WM_KEYUP: keys_held&=~keymap(w); return 0;
-  case WM_KILLFOCUS: keys_held=0;keys_tapped=0; InterlockedExchange(&g_mbtn,0); ClipCursor(NULL); ReleaseCapture(); return 0;
+    if(w<256){ keys_down[w>>6]|=1ull<<(w&63); if(test_tap_sample) keys_tapped|=keymap(w); } return 0;
+  case WM_SYSKEYUP: case WM_KEYUP: if(w<256) keys_down[w>>6]&=~(1ull<<(w&63)); return 0;
+  case WM_KILLFOCUS: memset(keys_down,0,sizeof keys_down);keys_tapped=0; InterlockedExchange(&g_mbtn,0); ClipCursor(NULL); ReleaseCapture(); return 0;
   case WM_APP+8: { char t[300]; if(w) snprintf(t,sizeof t,"%s  |  RECORDING (F7 to stop)",g_title); else snprintf(t,sizeof t,"%s  |  Video saved in the recordings folder",g_title); SetWindowTextA(h,t); return 0; }
   case WM_APP+10: { char t[400]; char* s=(char*)l; if(s){ snprintf(t,sizeof t,"%s  |  %s",g_title,s); free(s); } else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }   /* backend_status_win */
   case WM_APP+9: { char t[160]; if(w) snprintf(t,sizeof t,"%s  |  FAST FORWARD x%d (Tab or L3+R3)",g_title,(int)l); else snprintf(t,sizeof t,"%s",g_title); SetWindowTextA(h,t); return 0; }
@@ -409,6 +537,7 @@ void video_init(const char* title){
   { extern void (*g_backend_status)(const char*); g_backend_status=backend_status_win; }
   test_tap_sample=getenv("SWR_AUTOMATION_INPUT")!=NULL;
   snprintf(g_title,sizeof g_title,"%s",title);
+  bind_init();   /* the default bindings when the ini has no bind_ lines */
   xinput_load(); sdl_load(); timeBeginPeriod(1);
   if(!g_win_started){ g_ready=CreateEventA(NULL,TRUE,FALSE,NULL); _beginthread(win_thread,1<<20,NULL); }
   else SetEvent(g_video_go);   /* the front end ran in the window: continue there */
@@ -550,6 +679,7 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
        after the last touch (its own clock keeps running meanwhile, so it resumes where it would have been) */
     static u64 touched; static int taken; u64 now=plat_ns();
     int touch= *b!=0 || *lx>12000 || *lx< -12000 || *ly>12000 || *ly< -12000 || *rx>12000 || *rx< -12000 || *ry>12000 || *ry< -12000;
+    { static int iso=-1; if(iso<0) iso=getenv("SWR_TEST_MOUSE")!=NULL; if(iso) touch=0; }   /* a measured mouse test: no taking over */
     if(touch){ touched=now; if(!taken){ taken=1; LOG("test input: the player took over at guest frame %u\n",frame); } }
     else if(taken && now-touched>3000000000ull){ taken=0; LOG("test input: the replay carries on at guest frame %u\n",frame); }
     if(!taken){*b=v->buttons;*lx=v->lx;*ly=v->ly;*rx=v->rx;*ry=v->ry;}}
@@ -559,43 +689,46 @@ static void test_input_apply(u64*b,i32*lx,i32*ly,i32*rx,i32*ry){
   }
 }
 
-/* Mouse buttons press their Switch buttons (mouse_buttons in the ini) */
-static int g_mb_bit[5]={-2,-2,-2,-2,-2};   /* -2 not parsed yet, -1 none */
-void mouse_map_reset(void){ g_mb_bit[0]=-2; }
-static void mouse_map(void){
-  if(g_mb_bit[0]!=-2) return;
-  extern char g_opt_mouse_buttons[]; static const struct { const char* n; int bit; } N[]={{"a",0},{"b",1},{"x",2},{"y",3},
-    {"lstick",4},{"rstick",5},{"l",6},{"r",7},{"zl",8},{"zr",9},{"plus",10},{"minus",11}};
-  const char* p=g_opt_mouse_buttons;
-  for(int i=0;i<5;i++){ char t[16]; int k=0; while(*p==' ') p++; while(*p && *p!=',' && k<15) t[k++]=(char)tolower((unsigned char)*p++); t[k]=0; if(*p==',') p++;
-    g_mb_bit[i]=-1; for(size_t j=0;j<sizeof N/sizeof *N;j++) if(!strcmp(t,N[j].n)) g_mb_bit[i]=N[j].bit; } }
 int mouse_aim_button(void){ return 0; }   /* first person: the mouse always looks, no button to hold (mouse_apply) */
 /* test only: SWR_TEST_MOUSE="FRAME:DX,DY,BUTTONS;..." adds that movement at that guest frame and holds those buttons
    (hex, 1 left 2 right 4 middle) from there to the next entry */
-static void mouse_test(LONG* dx, LONG* dy, LONG* btn){
-  static const char* s; static int init, held; if(!init){ init=1; s=getenv("SWR_TEST_MOUSE"); }
+static LONG g_mtest_btn;   /* the buttons it holds now (mouse_bits) */
+static void mouse_test(LONG* dx, LONG* dy){
+  static const char* s; static int init; if(!init){ init=1; s=getenv("SWR_TEST_MOUSE"); }
   if(!s) return; extern int g_frames;
+  *dx=0; *dy=0;   /* only the movement asked for: the real mouse would spoil a measured turn */
   while(*s){ char* e; long f=strtol(s,&e,10); if(e==s || *e!=':' || g_frames<f) break;
     long x=strtol(e+1,&e,10); if(*e==',') e++; long y=strtol(e,&e,10); if(*e==',') e++; long b=strtol(e,&e,16);
-    *dx+=x; *dy+=y; held=(int)b; s= *e==';'? e+1 : e; }
-  *btn|=held; }
+    *dx+=x; *dy+=y; g_mtest_btn=(LONG)b; s= *e==';'? e+1 : e; } }
+/* mouse buttons press what the bindings give them, with mouse look on and the menu closed (it uses the mouse itself) */
+static u64 mouse_bits(void){
+  extern int g_opt_mouse_aim; if(!g_opt_mouse_aim || ov_is_open()) return 0;
+  LONG btn=g_mbtn|g_mtest_btn; u64 k=0;
+  for(int i=0;i<5;i++) if(btn>>i&1) k|=g_bind_mouse[i];
+  /* the game's Pointer scheme shoots with A, not ZR (2026-11-14: left click did nothing there): with the mouse driving
+     the motion sensor, a mouse button bound to ZR presses A instead, so the same click fires in both schemes */
+  { extern int g_opt_mouse_mode; if(g_opt_mouse_mode==1 && (k>>9&1)) k=(k&~(1ull<<9))|1ull; }
+  return k; }
 /* Mouse look: mouse speed becomes the right stick (the camera in Prime 4's dual stick scheme), the game's own turn speed
    and acceleration still apply. Full tilt at 3000 counts a second at 100% sensitivity; smoothed over a few polls so the
    stick doesn't flicker between mouse reports; a small minimum tilt so slow aiming clears the game's stick dead zone */
-static void mouse_apply(u64* b, i32* rx, i32* ry){
+static void mouse_apply(i32* rx, i32* ry){
   extern int g_opt_mouse_aim, g_opt_mouse_sens;
-  LONG dx=InterlockedExchange(&g_mdx,0), dy=InterlockedExchange(&g_mdy,0), btn=g_mbtn;
+  LONG dx=InterlockedExchange(&g_mdx,0), dy=InterlockedExchange(&g_mdy,0);
   static float vx, vy; static u64 last;
-  mouse_test(&dx,&dy,&btn);
+  mouse_test(&dx,&dy);
   if(!g_opt_mouse_aim){ vx=vy=0; last=0; return; }
-  mouse_map();
-  for(int i=0;i<5;i++) if((btn>>i&1) && g_mb_bit[i]>=0) *b|=1ull<<g_mb_bit[i];
   u64 now=plat_ns(); float dt= last? (float)((now-last)/1e9) : 0.016f; last=now; if(dt<0.001f) dt=0.001f; if(dt>0.1f) dt=0.1f;
   { /* mouse_mode=pointer: the mouse turns the emulated controller instead, for the game's Pointer control scheme (aim with
-       motion): 8000 counts for a full turn at 100%. Same axes as a real gyro: right = yaw negative, up = pitch positive */
-    extern int g_opt_mouse_mode; extern volatile float g_motion_gyro[3], g_motion_acc[3]; extern volatile unsigned long long g_motion_ns;
-    if(g_opt_mouse_mode==1){ float k=(float)g_opt_mouse_sens/100.0f/8000.0f/dt; static int said; if(!said){ said=1; LOG("input: mouse drives the motion sensor (Pointer mode)\n"); }
-      g_motion_gyro[0]=-(float)dy*k; g_motion_gyro[1]=0; g_motion_gyro[2]=-(float)dx*k; if(g_motion_acc[2]==0) g_motion_acc[2]=-1.0f; g_motion_ns=now; vx=vy=0; return; } }
+       motion): 40000 counts for a full turn at 100% (8000 crossed the screen in a twentieth of an inch at 16000 DPI, since
+       pointer aiming spans only about 40 degrees, 2026-11-14) */
+    /* The angle moved, not a speed: the HID update makes the speed over its own interval (svc_hid.c). A speed of
+       counts / time since the last poll blew up when two polls came 1 ms apart and was then held for the whole frame: a
+       slight move spun the view (2026-11-13). Right turned left: yaw is + for a move right */
+    extern int g_opt_mouse_mode; extern volatile float g_motion_acc[3]; extern volatile long long g_motion_pend_u[3]; extern volatile unsigned long long g_motion_mouse_ns;
+    if(g_opt_mouse_mode==1){ double k=(double)g_opt_mouse_sens/100.0/40000.0*1e6; static int said; if(!said){ said=1; LOG("input: mouse drives the motion sensor (Pointer mode)\n"); }
+      if(dx||dy){ __atomic_fetch_add(&g_motion_pend_u[0],(long long)((double)dy*k),__ATOMIC_RELAXED);   /* mouse up turned the gun down (2026-11-14) */ __atomic_fetch_add(&g_motion_pend_u[2],(long long)((double)dx*k),__ATOMIC_RELAXED); }
+      if(g_motion_acc[2]==0) g_motion_acc[2]=-1.0f; g_motion_mouse_ns=now; vx=vy=0; (void)dt; return; } }
   float s=(float)g_opt_mouse_sens/100.0f/3000.0f;
   /* The stick can't turn the camera faster than the game's own full-tilt speed, so a fast flick used to lose
      everything above it and a higher sensitivity changed nothing (issue 10: "slow no matter what it is set to"). The
@@ -625,7 +758,8 @@ static void mouse_capture(int want){ static int on; static u64 last; u64 now=pla
   else if(on){ ClipCursor(NULL); on=0; } }
 
 void video_poll(void){
-  u64 k=keys_held|keys_tapped, b=0;keys_tapped=0;
+  u64 k=keys_bits()|keys_tapped|mouse_bits(), b=0;keys_tapped=0;
+  { static int iso=-1; if(iso<0) iso=getenv("SWR_TEST_MOUSE")!=NULL; if(iso) k=mouse_bits(); }   /* test only: and no keyboard */
   i32 lx=axis(k,40,42), ly=axis(k,43,41), rx=axis(k,44,46), ry=axis(k,47,45);
   int sdl_on=sdl_poll(&b,&lx,&ly,&rx,&ry);
   extern int g_opt_ctrl_api;
@@ -655,11 +789,11 @@ void video_poll(void){
   if(test_replay){ phys=b; plx=lx; ply=ly; }   /* tests drive the menu with the replayed buttons */
   { extern int ov_pad(unsigned long long phys, int lx, int ly);   /* beyond_ui/ov.cpp: 1 = the menu has the controller */
     if(ov_pad(phys,plx,ply)){ b=0; lx=ly=rx=ry=0; } }
-  { extern int g_opt_mouse_aim; int menu=ov_is_open(); if(!menu) mouse_apply(&b,&rx,&ry);   /* the menu uses the mouse itself while open */
+  { extern int g_opt_mouse_aim; int menu=ov_is_open(); if(!menu) mouse_apply(&rx,&ry);   /* the menu uses the mouse itself while open */
     mouse_capture(!menu && g_opt_mouse_aim && GetForegroundWindow()==g_hwnd);
-    /* G: the lasso. The lasso is the left stick click and the pull a yank up: press G to click (120 ms), keep holding past
-       300 ms to yank: both sticks up and the controller tilted up, since it isn't known which of those the game reads.
-       R is a plain left stick click (keymap), W and the mouse work for the yank as well */
+    /* G: the lasso key (bind_lasso). The lasso is the left stick click and the pull a yank up: press G to click (120 ms),
+       keep holding past 300 ms to yank: both sticks up and the controller tilted up, since it isn't known which of those
+       the game reads. R is a plain left stick click (bind_lstick), W and the mouse work for the yank as well */
     { static u64 g0; int g=!menu && ((k>>48)&1); u64 now=plat_ns();
       if(!g) g0=0; else { if(!g0) g0=now; u64 held=now-g0;
         if(held<120000000ull) b|=1ull<<4;

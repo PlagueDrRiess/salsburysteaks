@@ -104,23 +104,14 @@ static void romfs_apply_mod(const char* root, const char* name){
   if(!plat_is_dir(p)) return;
   int r0=g_mod_replaced, a0=g_mod_added; overlay_scan(p,0);
   LOG("mods: %s (%d files replaced, %d added)\n",name,g_mod_replaced-r0,g_mod_added-a0); }
-/* Button-icon packs (Controls > Button icons): mod folders with these names are applied by [Input] button_icons, not
-   by load_order.txt, and last, so they win. auto asks the backend which controller is connected (backend_pad_family:
-   1 Xbox and everything else, Steam Deck included; 2 DualShock 4; 3 DualSense; 4 Switch controllers; 0 none) */
+/* Button-icon packs the Play screen once downloaded: Metroid Dread mods (Dread's textures/...bctex files, which Prime 4
+   never opens), so they only added files nothing reads. Prime 4's prompts are glyphs of its own fonts. Folders with
+   these names are left out of the mods (not even by load_order.txt), and noted once in the log */
 static const char* const ICON_PACK[]={"Switch to XBOX Layout","Switch to PS4 Layout","Switch to PS5 Layout"};
 static int icon_pack(const char* name){ for(int i=0;i<3;i++) if(!strcmp(name,ICON_PACK[i])) return 1; return 0; }
 static void icon_pack_apply(const char* root){
-  extern char g_opt_button_icons[]; extern int backend_pad_family(void);
-  const char* want=g_opt_button_icons; int fam=-1;
-  if(!strcmp(want,"auto")){ fam=backend_pad_family(); want= fam==1? "xbox" : fam==2? "ps4" : fam==3? "ps5" : "switch"; }
-  const char* order[3]={NULL,NULL,NULL};   /* the pack for the choice, then a PlayStation stand-in */
-  if(!strcmp(want,"xbox")) order[0]=ICON_PACK[0];
-  else if(!strcmp(want,"ps4")){ order[0]=ICON_PACK[1]; order[1]=ICON_PACK[2]; }
-  else if(!strcmp(want,"ps5")){ order[0]=ICON_PACK[2]; order[1]=ICON_PACK[1]; }
-  for(int i=0;i<3 && order[i];i++){ char p[1400]; snprintf(p,sizeof p,"%s/%s/romfs",root,order[i]);
-    if(plat_is_dir(p)){ LOG("button icons: %s%s -> %s\n",g_opt_button_icons,fam>=0? (fam==1? " (Xbox / other controller)" : fam==2? " (DualShock 4)" : fam==3? " (DualSense)" : fam==4? " (Switch controller)" : " (no controller)") : "",order[i]);
-      romfs_apply_mod(root,order[i]); return; } }
-  LOG("button icons: %s%s -> the game's own%s\n",g_opt_button_icons,fam==0? " (no controller)" : fam==4? " (Switch controller)" : "",strcmp(want,"switch")? " (that icon pack is not installed)" : ""); }
+  for(int i=0;i<3;i++){ char p[1400]; snprintf(p,sizeof p,"%s/%s/romfs",root,ICON_PACK[i]);
+    if(plat_is_dir(p)) LOG("button icons: %s is a Metroid Dread mod and does nothing in this game: not applied\n",ICON_PACK[i]); } }
 static void romfs_apply_mods(void){
   extern char g_datadir[]; char root[1200]; snprintf(root,sizeof root,"%smods",g_datadir);
   if(!plat_is_dir(root)) return;

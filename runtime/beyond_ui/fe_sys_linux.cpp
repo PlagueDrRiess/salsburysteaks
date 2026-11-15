@@ -422,16 +422,11 @@ bool mod_import_zip(const std::string& zip, std::string* err) {
     remove_tree(dir);
     return ok;
 }
-const IconPack ICON_PACKS[3] = {
-    {"Switch to XBOX Layout", "Xbox", "Krydar", "https://gamebanana.com/dl/679191"},
-    {"Switch to PS4 Layout", "PlayStation 4", "Nova77", "https://gamebanana.com/dl/680684"},
-    {"Switch to PS5 Layout", "PlayStation 5", "xSeRosiSx", "https://gamebanana.com/dl/681751"},
+const IconPack ICON_PACKS[3] = {   // Metroid Dread button-icon mods: they do nothing in this game (svc_fs.c leaves them out)
+    {"Switch to XBOX Layout", "Xbox"},
+    {"Switch to PS4 Layout", "PlayStation 4"},
+    {"Switch to PS5 Layout", "PlayStation 5"},
 };
-bool icon_pack_installed(int i) { return dir_exists(join(join(mods_dir(), ICON_PACKS[i].name), "romfs")); }
-bool icon_pack_get(int i, std::string* err) {   // some packs are .rar: the Linux build has no extractor for them yet
-    if (err) *err = std::string("Download it from ") + ICON_PACKS[i].url + " and add it with Mods > Add.";
-    open_in_explorer(ICON_PACKS[i].url); return false;
-}
 bool mod_remove(const std::string& name) {
     bool ok = recycle(join(mods_dir(), name));
     auto m = mods_list(); mods_write(m); return ok;
