@@ -312,6 +312,7 @@ static void bind_rebuild(void){
   u64 key[256]={0}, mouse[5]={0};
   for(int i=0;i<BIND_N;i++) for(int s=0;s<BIND_SLOTS;s++){ int c=g_bind[i][s]; u64 m=1ull<<BIND_IN[i].bit;
     if(c>0 && c<256) key[c]|=m; else if(c>=BIND_MOUSE && c<BIND_MOUSE+5) mouse[c-BIND_MOUSE]|=m; }
+  key[VK_ESCAPE]|=1ull<<11;   /* Esc is always Minus (the game's menu), as on Windows */
   for(int i=0;i<256;i++) g_bind_key[i]=key[i];
   for(int i=0;i<5;i++) g_bind_mouse[i]=mouse[i]; }
 static void bind_init(void){
@@ -487,7 +488,6 @@ static void key_down(XKeyEvent* e){
     return; }
   if(k==XK_Return && (e->state&Mod1Mask)){ if(once) set_fullscreen(!g_fullscreen); return; }
   switch(k){
-    case XK_Escape: g_quit=1; return;
     case XK_F11: if(once) set_fullscreen(!g_fullscreen); return;
     case XK_F3: if(once) g_shot_req=1; return;
     case XK_F7: if(once) LOG("F7 video recording is only available on Windows\n"); return;
