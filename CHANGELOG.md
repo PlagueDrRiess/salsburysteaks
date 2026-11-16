@@ -4,6 +4,15 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.23
+
+### Freezes after clearing the shader cache
+Clearing the `shader_cache` folder but keeping the `seed_*` files made the game think every shader of the seed was
+already built. It skipped building them in the background, and each one was built at its first draw instead: freezes
+of a second or more in play and cutscenes, however long the game was left running. The game now checks the built
+shaders on disk at start, and if most of them are gone it builds the whole seed again in the background (the log says
+"the shader cache was cleared"). To start clean, deleting the whole `shader_cache` folder is fine.
+
 ## 2026.11.22
 
 ### Ultrawide works (issue 17)

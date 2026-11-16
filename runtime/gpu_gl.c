@@ -4918,7 +4918,12 @@ static void seed_thread(void* arg){ (void)arg; plat_diag_role("shader-seed"); pl
     g_seed_f=fopen(path,"rb");
     LOG("shaders: seed made from the game files: %u programs, %.0f MB, from %u paks (%.0f MB of materials) in %.1f s; they are built in the background while you play\n",
         g_seed_n,g_seed_wpos/1048576.0,npak,bytes/1048576.0,(plat_ns()-t0)/1e9); }
-  if(g_seed_f) __atomic_store_n(&g_seed_ready,1,__ATOMIC_RELEASE); }
+  if(g_seed_f){ /* the built programs on disk, counted here off the GL thread: seed_built_load checks its list against them */
+    extern u32 g_seed_bins; u32 nb=0; size_t tl=strlen(g_pc_tag); PDir d;
+    if(tl && !plat_dir_open(&d,"shader_cache")){ while(plat_dir_next(&d)){ size_t l=strlen(d.name);
+        if(!d.is_dir && l>tl+5 && !strncmp(d.name,g_pc_tag,tl) && d.name[tl]=='_' && !strcmp(d.name+l-4,".bin")) nb++; } plat_dir_close(&d); }
+    g_seed_bins=nb;
+    __atomic_store_n(&g_seed_ready,1,__ATOMIC_RELEASE); } }
 /* The seed's translator thread: shader_to_glsl and its post passes, the expensive part, on a core of its own (on the GL
    thread they took it to 97% and the game to 30 FPS). Each result, with the same cache key and the same variants as the
    pre-build makes (integer textures, integer attributes), comes back through g_sq; the GL thread files it in the
@@ -5026,14 +5031,19 @@ static void seed_drain(void){
 /* Which seed programs are built already, per driver (shader_cache/seed_built_<driver>.bin): a later start skips them.
    Without it every start fed all 28,000 to the pre-build again, and the render thread's checks took the intro cutscene
    down to 29-50 FPS (2026-11-13) */
-static u8* g_seed_built; static u32 g_seed_built_new;
+static u8* g_seed_built; static u32 g_seed_built_new; u32 g_seed_bins;   /* the built programs in shader_cache (seed_thread) */
 static void seed_built_save(void){ if(!g_seed_built) return; char p[160]; snprintf(p,sizeof p,"shader_cache/seed_built_%s.bin",g_pc_tag);
   FILE* f=fopen(p,"wb"); if(f){ fwrite("SWRSBT01",1,8,f); fwrite(&g_seed_sig,8,1,f); fwrite(&g_seed_n,4,1,f); fwrite(g_seed_built,1,g_seed_n,f); fclose(f); } g_seed_built_new=0; }
 static void seed_built_mark(u32 i){ if(!g_seed_built || i>=g_seed_n || g_seed_built[i]) return; g_seed_built[i]=1; if(++g_seed_built_new>=2000) seed_built_save(); }
 static void seed_built_load(void){ g_seed_built=calloc(g_seed_n+1,1); if(!g_seed_built) return; char p[160]; snprintf(p,sizeof p,"shader_cache/seed_built_%s.bin",g_pc_tag);
   FILE* f=fopen(p,"rb"); char mg[8]; u64 sig=0; u32 n=0;
   if(f && fread(mg,1,8,f)==8 && !memcmp(mg,"SWRSBT01",8) && fread(&sig,8,1,f)==1 && sig==g_seed_sig && fread(&n,4,1,f)==1 && n==g_seed_n){
-    if(fread(g_seed_built,1,n,f)==n){ u32 k=0; for(u32 i=0;i<n;i++) k+=g_seed_built[i]; LOG("shaders: %u seed programs built on earlier starts, skipped\n",k); } }
+    if(fread(g_seed_built,1,n,f)==n){ u32 k=0; for(u32 i=0;i<n;i++) k+=g_seed_built[i];
+      /* the list says what was built, the programs themselves are separate files: a player who cleared the shader cache
+         but kept the seed_* files had every seed program skipped as built while none was there, so each one was built at
+         its first draw (freezes of seconds, 2026-11-15). Fewer than a quarter of them on disk: the list is dropped */
+      if(k>1000 && g_seed_bins<k/4){ memset(g_seed_built,0,n); LOG("shaders: the shader cache was cleared (%u programs on disk, %u listed as built): the seed is built again\n",g_seed_bins,k); }
+      else LOG("shaders: %u seed programs built on earlier starts, skipped\n",k); } }
   if(f) fclose(f); }
 static int seed_feed(void){
   if(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE) || g_seed_next>=g_seed_n || g_seed_next>=g_seed_drained) return 0;   /* only translated ones */
