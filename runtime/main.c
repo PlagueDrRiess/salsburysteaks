@@ -431,11 +431,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"hdr","0","1 = HDR output (renderer=vulkan_native, Windows HDR on): the game's picture on an HDR swapchain, highlights\n;   expanded toward the display's peak (like Windows Auto HDR). Falls back to SDR when the display offers no HDR"},
   {"hdr_paper_white","200","HDR output: brightness of normal (SDR white) content in nits (80-1000)"},
   {"hdr_peak","0","HDR output: brightest highlight in nits; 0 = what the display reports"},
-#ifdef _WIN32
   {"prebuild_shaders","1","1 = build every shader before the game draws with it: the shaders it ships in romfs/system/shd, and the ones\n;   it unpacks into GPU memory (Metroid Prime 4 at boot), compiled in the background and kept ready. 0 = at first use"},
-#else
-  {"prebuild_shaders","0","1 = build every shader before the game draws with it: the shaders it ships in romfs/system/shd, and the ones\n;   it unpacks into GPU memory (Metroid Prime 4 at boot), compiled in the background and kept ready. 0 = at first use"},
-#endif
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {"save_set","","Save in use: empty = your own game, or the name of a folder in <game>_data/save/sets (the launcher's\n;   \"Save in use\" choice): another save to play from, kept apart from your own"},
   {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},

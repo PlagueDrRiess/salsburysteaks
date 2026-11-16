@@ -224,11 +224,7 @@ static Rec recommend() {
 }
 static void apply_rec(const Rec& r) {
     set("docked", "1"); set("fullscreen", "1"); set("resolution", fmt("%g", r.res)); set("fps_limit", r.fps); set("renderer", r.renderer);
-#ifdef _WIN32
     set("anisotropy", r.af); set("sharpening", r.sharp); set("sleep_waits", "1"); set("texture_threads", "0"); set("prebuild_shaders", "1");
-#else
-    set("anisotropy", r.af); set("sharpening", r.sharp); set("sleep_waits", "1"); set("texture_threads", "0"); set("prebuild_shaders", "0");
-#endif
     set("auto_set", "1");
 }
 static std::string hw_line() {

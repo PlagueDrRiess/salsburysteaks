@@ -661,6 +661,7 @@ u64 plat_file_size(const char* p){ struct stat s; if(stat(p,&s)) return 0; retur
 int plat_pread(FILE* f, void* buf, u64 size, u64 off){ return (int)pread(fileno(f),buf,size,(off_t)off); }
 
 int plat_ncpu(void){ long n=sysconf(_SC_NPROCESSORS_ONLN); return n>0? (int)n : 1; }
+unsigned long long plat_ram_mb(void){ long p=sysconf(_SC_PHYS_PAGES), s=sysconf(_SC_PAGE_SIZE); return p>0 && s>0? (unsigned long long)p*(unsigned long long)s>>20 : 0; }
 
 void plat_battery(int* pct, int* chg){ *pct=100; *chg=1;
   FILE* f=fopen("/sys/class/power_supply/BAT0/capacity","r"); if(!f) return;
