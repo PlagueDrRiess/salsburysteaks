@@ -5264,6 +5264,14 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
       if(getenv("SWR_FORCE_DECODE")){ g_has_s3tc=g_has_rgtc=g_has_bptc=0; }
       LOG("GLES: native ASTC=%d, BC1-3=%d, BC4-5=%d, BC6-7=%d (the rest are decoded on the CPU)\n",g_has_astc,g_has_s3tc,g_has_rgtc,g_has_bptc); } }
   LOG("OpenGL: %s / %s / %s\n",(const char*)glGetString(GL_VENDOR),(const char*)glGetString(GL_RENDERER),(const char*)glGetString(GL_VERSION));
+#ifndef _WIN32
+  { /* Mesa (RX 7600, 16 GB, report of 2026-11-16): the pre-build keeps every program it links in the driver, over 16,000
+       with the seed, until memory runs out and the game crashes. Off there below 24 GB until the programs go to disk
+       instead (SWR_PREBUILD_LOWRAM=1 keeps it on) */
+    extern unsigned long long plat_ram_mb(void); const char* ver=(const char*)glGetString(GL_VERSION); unsigned long long mb=plat_ram_mb();
+    if(g_opt_prebuild && !g_gles && ver && strstr(ver,"Mesa") && mb && mb<24000 && !getenv("SWR_PREBUILD_LOWRAM")){
+      g_opt_prebuild=0; LOG("shaders: Mesa with %llu MB of memory: the shader pre-build is off (it holds every program in memory); new shaders build at first use\n",mb); } }
+#endif
   { /* compile on the driver's threads so we don't freeze */
     g_par=0; int vl=0; GLint n=0; glGetIntegerv(GL_NUM_EXTENSIONS,&n); typedef const GLubyte* (APIENTRY*GSI2)(GLenum,GLuint); GSI2 gsi=(GSI2)backend_gl_proc("glGetStringi");
     for(GLint k=0;k<n && gsi;k++){ const char* e=(const char*)gsi(GL_EXTENSIONS,(GLuint)k); if(!e) continue;

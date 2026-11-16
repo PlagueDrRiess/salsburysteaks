@@ -83,7 +83,7 @@ void change(const char* k, const std::string& v) {
     g_vals[k] = v; settings_queue(k, v.c_str());
     Lock l; g_q.vals[k] = v;
 }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
 // keyboard and mouse bindings (CONTROLS): the bind_ values, changed like any setting
 BindUi g_bind = {
     [](int i) { auto it = g_vals.find(bind_input_key(i)); return it != g_vals.end() ? it->second : std::string(bind_default(i)); },
@@ -149,7 +149,7 @@ void tab_content(int t) {
     case 5: section("MOUSE"); opt_row("mouse_aim"); opt_row("mouse_mode"); opt_row("mouse_sensitivity");
             section("CONTROLLER"); opt_row("stick_deadzone"); opt_row("rumble"); opt_row("menu_shortcut"); opt_row("controller_api");
             help_text("Button mapping and menu buttons are on the Play screen's Controls page.");
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
             section("KEYBOARD AND MOUSE"); g_bind.ff = val("fast_forward") == "1"; bind_rows(g_bind);
 #endif
             break;
@@ -161,7 +161,7 @@ void tab_content(int t) {
                                {"Vi-O-La on / off", "V"}, {"Vi-O-La: go / brake / boost / fire", "Left click / Shift / Space / E"},
                                {"Pick shot", "1 2 3 4"}, {"Game menu", "Esc or Tab"}, {"Menus: confirm / back", "Enter / Backspace"}};
         for (auto& r : kb) row_text(r[0], r[1]);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
         help_text("The game's keys and mouse buttons above are the defaults: CONTROLS, Keyboard and mouse changes them.");
 #endif
         section("ABOUT"); help_text("Metroid Prime 4 Recomp: Metroid Prime 4 Beyond recompiled for PC. SwitchRecomp by MZ Labs; Native Vulkan by ScarletNX; Dear ImGui; SDL2. Full credits on the Play screen.");
@@ -234,7 +234,7 @@ void snapshot_settings() {   // main thread
     bindings_from_string(settings_get("launcher_bindings", "1,0,6,7,10"), g_q.bind);
     g_q.nav_on = strcmp(settings_get("launcher_nav", "1"), "0") != 0; g_q.prompts = prompt_style_from(settings_get("launcher_prompts", "auto"));
     g_q.renderer = settings_get("renderer", "opengl");
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
     for (int i = 0; i < bind_count(); i++) g_q.vals[bind_input_key(i)] = settings_get(bind_input_key(i), bind_default(i));
 #endif
 }
@@ -252,6 +252,8 @@ extern "C" void ov_input_char(unsigned c) { if (!g_q.open) return; Lock k; g_q.e
 extern "C" void ov_input_mouse(float x, float y) { if (!g_q.open) return; Lock k; g_q.ev.push_back({2, 0, 0, x, y}); }
 extern "C" void ov_input_button(int b, int down) { if (!g_q.open) return; Lock k; g_q.ev.push_back({3, b, down != 0}); }
 extern "C" void ov_input_wheel(float dy) { if (!g_q.open) return; Lock k; g_q.ev.push_back({4, 0, 0, 0, dy}); }
+extern "C" int ov_is_capturing(void) { return g_q.open && g_q.capture ? 1 : 0; }
+extern "C" void ov_input_bind_code(int code) { if (!g_q.open || !g_q.capture || code <= 0) return; Lock k; g_q.ev.push_back({5, code, 0, 0, 0}); }
 #ifdef _WIN32
 static int ovk_from_vk(unsigned long long w) {
     switch (w) { case VK_UP: return OVK_UP; case VK_DOWN: return OVK_DOWN; case VK_LEFT: return OVK_LEFT; case VK_RIGHT: return OVK_RIGHT;
@@ -341,12 +343,12 @@ extern "C" void ov_gl_frame(void) {
     }
     static bool was_open;
     if (!open) { if (was_open) { was_open = false; g_vals.clear(); g_rev.active = false; g_quit_confirm = false;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
             bind_cancel(g_bind); Lock k; g_q.capture = false;
 #endif
         } return; }
     if (!was_open) { was_open = true; g_t_open = ImGui::GetCurrentContext() ? ImGui::GetTime() : 0; g_tab_changed = true; { Lock k; g_vals = g_q.vals; }
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
         bind_cancel(g_bind);
 #endif
         /* keys held when it last closed: their key-ups went to the game, so ImGui still had Escape down and its key
@@ -378,7 +380,7 @@ extern "C" void ov_gl_frame(void) {
         case 2: io.AddMousePosEvent(e.x, e.y); break;
         case 3: io.AddMouseButtonEvent(e.a, e.b != 0); break;
         case 4: io.AddMouseWheelEvent(0, e.y); break;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
         case 5: bind_take(g_bind, e.a); break;
 #endif
         }
@@ -386,7 +388,7 @@ extern "C" void ov_gl_frame(void) {
     float sc = std::max(0.55f, std::min(2.2f, std::min(h / 1080.0f, w / 1700.0f))); if (fabsf(sc - g_scale) > 0.01f) apply_style(sc);
     ImGui_ImplOpenGL3_NewFrame(); ImGui::NewFrame();
     nav_frame_begin();
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
     if (g_bind.cap >= 0 && g_tab != 5) bind_cancel(g_bind);
     if (g_bind.cap >= 0 && (up || down || left || right || std::any_of(act, act + NAV_COUNT, [](bool a) { return a; }))) {   // a controller press cancels a key binding's wait
         bind_cancel(g_bind); up = down = left = right = false; memset(act, 0, sizeof act); }
@@ -398,7 +400,7 @@ extern "C" void ov_gl_frame(void) {
     if (act[NAV_PREV] || ImGui::IsKeyPressed(ImGuiKey_PageUp)) { g_tab = (g_tab + NTABS - 1) % NTABS; g_tab_changed = true; }
     if (act[NAV_NEXT] || ImGui::IsKeyPressed(ImGuiKey_PageDown)) { g_tab = (g_tab + 1) % NTABS; g_tab_changed = true; }
     draw_menu((float)w, (float)h, ImGui::GetTime());
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
     { Lock k; g_q.capture = g_bind.cap >= 0; }
 #endif
     if (!g_rev.active) nav_move(down ? 1 : up ? -1 : 0);   // controller up/down (keyboard arrows use ImGui's own nav)

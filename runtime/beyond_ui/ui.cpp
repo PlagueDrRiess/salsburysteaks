@@ -572,7 +572,7 @@ void progress_bar(float frac, ImVec2 size, const char* text) {
     dl->AddText({p.x + size.x / 2 - ts.x / 2, p.y + size.y / 2 - ts.y / 2}, IM_COL32(255, 255, 255, 255), text);
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
 // ---------------------------------------------------------------- keyboard and mouse bindings
 enum { BIND_MAX = 32 };
 static int bind_n() { return std::min(bind_count(), (int)BIND_MAX); }
