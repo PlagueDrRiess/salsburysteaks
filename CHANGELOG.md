@@ -4,6 +4,20 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.24
+
+### Linux: builds again, with keyboard and mouse bindings and mouse aim (thanks, patrickksmdev)
+- The Linux build links again, and VP9 cutscenes use the system's libvpx when the bundled one isn't there.
+- Keyboard and mouse can be rebound in the menu and the `bind_` lines of the ini, as on Windows; mouse aim works in
+  both Stick and Pointer mode, and the lasso key too. Esc opens the game's menu instead of quitting.
+- On Mesa drivers with less than 24 GB of memory the shader pre-build is off for now: it kept every shader program in
+  memory until a 16 GB system ran out and the game crashed. The log says when this applies. Everywhere else it stays
+  on.
+
+### Portuguese (Brazil) in the language list (thanks, patrickksmdev)
+The console's language list now has all 18 languages for every way the game can ask for it, Portuguese (Brazil)
+included.
+
 ## 2026.11.23
 
 ### Freezes after clearing the shader cache
