@@ -572,7 +572,7 @@ void progress_bar(float frac, ImVec2 size, const char* text) {
     dl->AddText({p.x + size.x / 2 - ts.x / 2, p.y + size.y / 2 - ts.y / 2}, IM_COL32(255, 255, 255, 255), text);
 }
 
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
 // ---------------------------------------------------------------- keyboard and mouse bindings
 enum { BIND_MAX = 32 };
 static int bind_n() { return std::min(bind_count(), (int)BIND_MAX); }
@@ -749,7 +749,11 @@ static std::vector<Opt> build_options() {
     I("rumble", "Input", "Controls", "Rumble strength", LIVE_YES, "100", 0, 200, 10, "0 = off. Up to 200% boosts soft effects.");
     // Advanced
     B("wait_for_shaders", "Launcher", "Advanced", "Wait for new shaders", LIVE_RESTART, "0", "On: no missing objects, a short stutter the first time an effect appears. Off: no stutter, objects can pop in.");
+#ifdef _WIN32
     B("prebuild_shaders", "Graphics", "Advanced", "Build all shaders before playing", LIVE_RESTART, "1",
+#else
+    B("prebuild_shaders", "Graphics", "Advanced", "Build all shaders before playing", LIVE_RESTART, "0",
+#endif
       "OpenGL: the first start after an update or driver change takes up to about 30 s. Native Vulkan: the game's shaders are prepared in the background while the title screen plays, so the first session stutters much less.");
     B("low_priority_shader_compiler", "Performance", "Advanced", "Compile shaders at low priority", LIVE_RESTART, "1", "");
     B("sleep_waits", "Performance", "Advanced", "Sleep instead of spinning while waiting for the driver", LIVE_YES, "1", "Frees CPU time on 2-4 core PCs.");

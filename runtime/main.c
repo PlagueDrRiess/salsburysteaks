@@ -375,7 +375,13 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"shader_loader")){ extern int g_opt_shader_loader; g_opt_shader_loader=atoi(v); }   /* gpu_gl.c background program loader, restart */
     else if(!strcmp(k,"oq_sync")){ extern int g_opt_oq_sync; g_opt_oq_sync=atoi(v); }   /* gpu_gl.c oq_poll, live */
     else if(!strcmp(k,"slab_min_mb")){ extern int g_opt_slab_min_mb; g_opt_slab_min_mb=atoi(v); }   /* gpu_gl.c slab_setup; 32 = as before */
-    else if(!strcmp(k,"splash")){ extern int g_opt_splash; g_opt_splash=atoi(v); }   /* splash_win32.c, next launch */
+    else if(!strcmp(k,"splash")){
+#ifdef _WIN32
+      extern int g_opt_splash; g_opt_splash=atoi(v);
+#else
+      (void)v;
+#endif
+    }   /* splash_win32.c, next launch */
     else if(!strcmp(k,"amiibo")){ extern int g_opt_amiibo; g_opt_amiibo=atoi(v); }   /* svc_core.c virtual amiibo, restart */
     else if(!strcmp(k,"blit_nosync")){ extern int g_opt_blit_nosync; g_opt_blit_nosync=atoi(v); }   /* gpu_gl.c lvl_blit, restart */
     else if(!strcmp(k,"worker_finish")){ extern int g_opt_worker_finish; g_opt_worker_finish=atoi(v); }   /* gpu_gl.c shader_worker, an experiment, live */
@@ -425,7 +431,11 @@ static const IniOpt INI_GRAPHICS[]={
   {"hdr","0","1 = HDR output (renderer=vulkan_native, Windows HDR on): the game's picture on an HDR swapchain, highlights\n;   expanded toward the display's peak (like Windows Auto HDR). Falls back to SDR when the display offers no HDR"},
   {"hdr_paper_white","200","HDR output: brightness of normal (SDR white) content in nits (80-1000)"},
   {"hdr_peak","0","HDR output: brightest highlight in nits; 0 = what the display reports"},
+#ifdef _WIN32
   {"prebuild_shaders","1","1 = build every shader before the game draws with it: the shaders it ships in romfs/system/shd, and the ones\n;   it unpacks into GPU memory (Metroid Prime 4 at boot), compiled in the background and kept ready. 0 = at first use"},
+#else
+  {"prebuild_shaders","0","1 = build every shader before the game draws with it: the shaders it ships in romfs/system/shd, and the ones\n;   it unpacks into GPU memory (Metroid Prime 4 at boot), compiled in the background and kept ready. 0 = at first use"},
+#endif
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {"save_set","","Save in use: empty = your own game, or the name of a folder in <game>_data/save/sets (the launcher's\n;   \"Save in use\" choice): another save to play from, kept apart from your own"},
   {"renderer","opengl","opengl, or vulkan = the game still renders with OpenGL but Vulkan puts the frames on screen\n;   (falls back to OpenGL output if the GPU driver can't share images between the two; restart required),\n;   or vulkan_native = EXPERIMENTAL native Vulkan renderer from ScarletNX (GPL-3.0; falls back to OpenGL if it can't start)"},
@@ -499,8 +509,8 @@ static const IniOpt INI_INPUT[]={
   {"stick_deadzone","7000","stick dead zone (0..30000, out of 32767)"},
   {"rumble","100","controller rumble strength in percent (0 = off, up to 200): the game's HD rumble on the pad's two motors"},
   {NULL,NULL,NULL}};
-#ifdef _WIN32
-/* the bind_ lines after [Input]'s options (backend_win32.c has the list and the defaults) */
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
+/* the bind_ lines after [Input]'s options (backend_win32.c / backend_x11.c has the list and the defaults) */
 static const char* const INI_BIND_HELP=
   "Keyboard and mouse: bind_<Switch input>=up to two keys or mouse buttons, comma separated; empty = none, no line = the default.\n"
   ";   Keys: A-Z, 0-9, Space, Enter, Backspace, Tab, Shift, Ctrl, CapsLock, Left, Up, Right, Down, Insert, Delete, Home, End,\n"
@@ -545,7 +555,7 @@ static char g_ini_path[1400]; static u64 g_ini_mtime;
 static u64 file_mtime(const char* p){ struct stat st; if(stat(p,&st)) return 0; return (u64)st.st_mtime; }
 
 static int ini_known(const char* k){ for(int s=0;INI_SECS[s].title;s++) for(const IniOpt* o=INI_SECS[s].o;o->key;o++) if(!strcmp(o->key,k)) return 1;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
   for(int i=0;i<bind_count();i++) if(!strcmp(bind_input_key(i),k)) return 1;
 #endif
   return 0; }
@@ -563,7 +573,7 @@ void ini_write(void){
   for(int s=0;INI_SECS[s].title;s++){
     fprintf(f,"\n[%s]\n",INI_SECS[s].title);
     for(const IniOpt* o=INI_SECS[s].o;o->key;o++) fprintf(f,"; %s\n%s=%s\n",o->help,o->key,ini_get(o->key,o->def));
-#ifdef _WIN32
+#if defined(_WIN32) || defined(SWR_HAVE_KEYBIND)
     if(INI_SECS[s].o==INI_INPUT){ fprintf(f,"; %s\n",INI_BIND_HELP); for(int i=0;i<bind_count();i++) fprintf(f,"%s=%s\n",bind_input_key(i),ini_get(bind_input_key(i),bind_default(i))); }
 #endif
   }

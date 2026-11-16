@@ -4642,7 +4642,11 @@ static void warm_step(void){
    keyed as a draw with all-float vertex attributes, textures and render targets keys them (key2 0): integer variants
    (skinning indices, integer targets) still build at first use. A file once done is listed (name and size) in
    shader_cache/prebuilt_<tag>.txt and skipped next time, so only new or changed files cost time */
+#ifdef _WIN32
 int g_opt_prebuild=1;
+#else
+int g_opt_prebuild=0;
+#endif
 extern int shader_program_check(const u8* code, u32 max_bytes, u32* out_len, int* type);
 void (*g_backend_status)(const char* text);   /* the window title (backend_win32.c sets it); NULL elsewhere */
 static void backend_status(const char* t){ if(g_backend_status) g_backend_status(t); }
