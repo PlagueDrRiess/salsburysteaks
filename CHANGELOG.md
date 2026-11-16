@@ -4,6 +4,19 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.25
+
+### Objects missing or ghosting for seconds on a fresh install (issues 8 and 18)
+On the first starts the game builds about 28,000 shaders from your game files in the background. A shader the game
+needed right away was written to disk behind all of them, so the helpers got it late: logs showed waits of 8, 20, 48
+and even 167 seconds, with objects missing or ghosting all that time. A shader the game is waiting for now goes ahead
+of everything else, and the background build pauses while the disk writes are behind.
+
+### "Wait for new shaders" no longer turns off building ahead
+With **Wait for new shaders** on (`wait_for_shaders=1`), the helpers and the background build were switched off too,
+so every shader was built at its first draw while the game waited: freezes of a second or two each, 23 seconds in one
+cutscene. The setting now only makes draws wait; shaders are still built ahead.
+
 ## 2026.11.24
 
 ### Linux: builds again, with keyboard and mouse bindings and mouse aim (thanks, patrickksmdev)

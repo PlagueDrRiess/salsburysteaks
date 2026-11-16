@@ -1536,7 +1536,7 @@ static u64 src_key(Sh* s){ if(!s->skey){ u64 h= s->src? fast_hash((const u8*)s->
 static u64 prog_key(Sh* vs, Sh* fs){ return src_key(vs)*0x9E3779B97F4A7C15ull ^ src_key(fs)*0xC2B2AE3D27D4EB4Full ^ 0x5E9A0001ull; }
 
 static u64 sh_key(Sh* s){ return src_key(s)*0x9E3779B97F4A7C15ull ^ 0x5E9A0000ull; }
-static int g_par=-1;
+static int g_par=-1, g_par_bg;   /* g_par_bg: the driver compiles in parallel, also with wait_for_shaders=1 */
 static int g_lf_light, g_lf_run, g_lf_reveal; static u64 g_lf_wait_ns;   /* load-screen detector (frame_stats) */
 static u64 st_lf_waits, st_lf_wait_ns;   /* draws that waited for shaders on light frames, and how long */
 static u64 st_dw_waits, st_dw_ns;   /* draws in play that waited for their shaders instead of being skipped */
@@ -4542,18 +4542,26 @@ static void pk_put(u64 k){ if(!k) k=1; if(pk_n*2>=pk_cap){ u32 oc=pk_cap; u64* o
   u32 i=(u32)(k^(k>>29))&(pk_cap-1); while(pk_keys[i]){ if(pk_keys[i]==k) return; i=(i+1)&(pk_cap-1); } pk_keys[i]=k; pk_n++; }
 /* disk writes happen on a background thread; with AV scanning, an fopen on Windows can take tens of ms */
 typedef struct AwJob { struct AwJob* next; char path[200]; u8* data; size_t n; int append; } AwJob;
-static AwJob* volatile g_aw_head; static AwJob* g_aw_tail; static PMutex g_aw_m; static volatile int g_aw_on;
+static AwJob* volatile g_aw_head; static AwJob* g_aw_tail; static AwJob* g_aw_ut; static PMutex g_aw_m; static volatile int g_aw_on;
+static volatile int g_aw_pend;   /* writes still queued */
 
 static void aw_thread(void* arg){ plat_diag_role("cache-writer"); (void)arg; plat_thread_low_priority();
-  for(;;){ pm_lock(&g_aw_m); AwJob* j=g_aw_head; if(j){ g_aw_head=j->next; if(!g_aw_head) g_aw_tail=NULL; } pm_unlock(&g_aw_m);
+  for(;;){ pm_lock(&g_aw_m); AwJob* j=g_aw_head; if(j){ g_aw_head=j->next; if(!g_aw_head) g_aw_tail=NULL; if(j==g_aw_ut) g_aw_ut=NULL; } pm_unlock(&g_aw_m);
     if(!j){ plat_sleep_ns(20000000); continue; }
-    FILE* f=fopen(j->path,j->append? "ab" : "wb"); if(f){ fwrite(j->data,1,j->n,f); fclose(f); } free(j->data); free(j); } }
+    FILE* f=fopen(j->path,j->append? "ab" : "wb"); if(f){ fwrite(j->data,1,j->n,f); fclose(f); } free(j->data); free(j); __atomic_sub_fetch(&g_aw_pend,1,__ATOMIC_RELAXED); } }
 
+/* A draw's shader job (.job) goes ahead of everything else in the queue, in the order they came. Behind the seed's
+   thousands of .pjob files a draw's own job reached the helpers 48 s late on a fresh install, 167 s in another run, its
+   objects missing or ghosting all that time (RTX 4080 logs, 2026-11-16) */
 static void aw_write(const char* path, const void* d, size_t n, int append){
   if(!g_aw_on){ pm_init(&g_aw_m); g_aw_on= plat_thread(aw_thread,NULL,256*1024)? -1 : 1; }
   if(g_aw_on<0){ FILE* f=fopen(path,append? "ab" : "wb"); if(f){ fwrite(d,1,n,f); fclose(f); } return; }
   AwJob* j=calloc(1,sizeof *j); snprintf(j->path,sizeof j->path,"%s",path); j->data=malloc(n?n:1); memcpy(j->data,d,n); j->n=n; j->append=append;
-  pm_lock(&g_aw_m); if(g_aw_tail) g_aw_tail->next=j; else g_aw_head=j; g_aw_tail=j; pm_unlock(&g_aw_m); }
+  size_t pl=strlen(path); int urgent= pl>4 && !strcmp(path+pl-4,".job");
+  pm_lock(&g_aw_m);
+  if(urgent){ if(g_aw_ut){ j->next=g_aw_ut->next; g_aw_ut->next=j; } else { j->next=g_aw_head; g_aw_head=j; } if(!j->next) g_aw_tail=j; g_aw_ut=j; }
+  else { if(g_aw_tail) g_aw_tail->next=j; else g_aw_head=j; g_aw_tail=j; }
+  pm_unlock(&g_aw_m); __atomic_add_fetch(&g_aw_pend,1,__ATOMIC_RELAXED); }
 
 static void pack_add(u64 key, Sh* vs, Sh* fs){
   if(!vs->src || !fs->src || pk_has(key)) return; pk_put(key);
@@ -4575,7 +4583,7 @@ static u64 g_warm_t0;
 static void warm_load(void){
   pcache_init();translated_load(); g_warm_t0=plat_ns();
   /* the helpers start first: shaders in the pack without a binary for this driver go straight to them (below) */
-  if(g_nv_win && g_par>0 && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
+  if(g_nv_win && g_par_bg && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
   FILE* f=fopen(PACK_PATH,"rb"); if(!f) return; u32 cap=0;
   GLuint* wp=NULL; int wp_n=0, wp_cap=0;   /* programs loaded from binaries: their uniforms are looked up at boot (glq_uloc_prime) */
   /* the splash's progress bar: this loop is most of the wait between Play and the first frame (16 s of 18 for 7626
@@ -5048,6 +5056,7 @@ static void seed_built_load(void){ g_seed_built=calloc(g_seed_n+1,1); if(!g_seed
 static int seed_feed(void){
   if(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE) || g_seed_next>=g_seed_n || g_seed_next>=g_seed_drained) return 0;   /* only translated ones */
   if(!g_seed_built) seed_built_load();
+  if(__atomic_load_n(&g_aw_pend,__ATOMIC_RELAXED)>64) return 0;   /* the disk writer is behind: the seed waits, not the game's files */
   { /* the game first: at most 2 a frame, and none in a frame after one that ran long */
     static u32 ff, fn; static u64 ft; static int slow;
     if(ff!=g_frame){ u64 now=plat_ns(); slow= ft && now-ft>20000000ull; ff=g_frame; ft=now; fn=0; }
@@ -5069,9 +5078,9 @@ static void mem_prebuild_step(void){
      (300-390 ms frames), and the driver's background builds later blocked the GL thread 100-240 ms in play, one frame 1.9 s.
      Without it a cutscene's shaders only start building when it starts: 2026-11-08, a third of its draws (Samus, the
      marines) were missing for its whole length */
-  if(g_mp_on<0 && g_nv_win && g_par>0 && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
+  if(g_mp_on<0 && g_nv_win && g_par_bg && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
   ld_drain();
-  if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && (g_worker==1 || (g_nv_win && g_par>0 && (g_helper>0 || getenv("SWR_NV_PREBUILD")))) && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
+  if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && (g_worker==1 || (g_nv_win && g_par_bg && (g_helper>0 || getenv("SWR_NV_PREBUILD")))) && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
     if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0;
       else if(!getenv("SWR_NO_SEED")){ u8 z[128]; memset(z,0,sizeof z); shader_program_check(z,sizeof z,NULL,NULL);   /* the decoder's tables, made here before another thread uses them */
         plat_thread(seed_thread,NULL,512*1024); plat_thread(seed_tr_thread,NULL,4u<<20); } }   /* every shader of the game files, translated and built ahead (SWR_NO_SEED=1: off).
@@ -5283,7 +5292,7 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
       LOG("gpu: render target layer from the vertex shader: %s\n",g_vs_layer_ext==1? "ARB_shader_viewport_layer_array" : g_vs_layer_ext==2? "AMD_vertex_shader_layer" : g_vs_layer_ext==3? "NV_viewport_array2" : "not available (drawn to layer 0)"); }
     if(g_vtc) LOG("gpu: GL_NV_texture_compression_vtc: S3TC 3D textures are reordered into its 4x4x4 blocks\n");
     if(!g_gles) LOG("ASTC textures: %s\n",g_has_astc && !getenv("SWR_ASTC_CPU")? "decoded by the GPU (fast, with mipmaps)" : "decoded on the CPU");
-    int had_par=g_par; if(getenv("SWR_SYNC_SHADERS")) g_par=0;
+    int had_par=g_par, sync_drw=getenv("SWR_SYNC_SHADERS")!=NULL; if(sync_drw) g_par=0;
     { /* AMD (RX 9070 XT, driver 26.10.2, report of 2026-11-12): the crash at start is on a thread of the driver's own,
          0.3 s after the first shaders are built, with its parallel compile asked for on as many threads as it likes.
          Our compile threads were already off there (backend_win32.c); now the driver's are too: every shader is built on
@@ -5313,7 +5322,11 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
         if(g_nv_win) LOG("shaders: NVIDIA compiles on %d threads of its own (glMaxShaderCompilerThreads)\n",nvn); } }
     if(g_nv_win) LOG("shaders: NVIDIA on Windows: the driver compiles new shaders itself, no compile threads of ours\n");
     LOG("shaders: parallel compilation %s\n",g_par? "enabled (no stutter: anything still compiling is drawn as soon as it is ready)"
-        : had_par? "off: wait_for_shaders=1 makes each draw wait for its new shader (the driver has it)" : "not available in this driver"); }
+        : had_par? "off: wait_for_shaders=1 makes each draw wait for its new shader (the driver has it)" : "not available in this driver");
+    /* the background work (the shader helpers, the pre-build from GPU memory and the seed) stays on with
+       wait_for_shaders=1: that setting is about draws only. It turned all of it off, so every shader was built at its
+       first draw while the game waited, a second or two each (23.5 s in one cutscene, 2026-11-14) */
+    g_par_bg= g_par>0 || (sync_drw && had_par); }
   { GLint v[6]={0}; glGetIntegerv(0x8B4D,&v[0]); glGetIntegerv(0x8872,&v[1]); glGetIntegerv(0x8A2F,&v[2]); glGetIntegerv(0x8A2B,&v[3]); glGetIntegerv(0x8A2D,&v[4]); glGetIntegerv(0x826E,&v[5]);
     LOG("OpenGL limits: textures %d (per stage %d), UBO %d (VS %d, FS %d), uniform locations %d\n",v[0],v[1],v[2],v[3],v[4],v[5]);
     GLint sb[4]={0}; glGetIntegerv(0x90DD,&sb[0]); glGetIntegerv(0x90D6,&sb[1]); glGetIntegerv(0x90DA,&sb[2]); glGetIntegerv(0x90D7,&sb[3]);   /* bindings, VS, FS, GS blocks */
