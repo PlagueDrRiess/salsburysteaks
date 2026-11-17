@@ -134,7 +134,8 @@ static void vib_set(u32 handle, const float* v){
   u32 dev=(handle>>16)&0xFF; if(dev>1) dev=1;
   for(int i=0;i<4;i++) g_vib[dev][i]= v[i]==v[i] && v[i]>0? v[i] : 0;   /* NaN or negative: silent */
   g_vib_ns[dev]=plat_ns();
-  if(!g_vib_n++) LOG("input: the game sent its first rumble (amplitudes %.2f low / %.2f high)\n",v[0],v[2]); }
+  if(!g_vib_n++) LOG("input: the game sent its first rumble (amplitudes %.2f low / %.2f high)\n",v[0],v[2]);
+  { static int said; if(!said && (v[0]>0.001f || v[2]>0.001f)){ said=1; LOG("input: the game's first non-zero rumble (amplitudes %.2f low / %.2f high)\n",v[0],v[2]); } } }
 /* the pad's motors, 0..1: the heavy (low-frequency) one takes the stronger low band of the two sides, the light one
    the stronger high band. A side not refreshed for 200 ms counts as stopped (the game stops sending when it ends) */
 void hid_rumble_get(float* lo, float* hi){

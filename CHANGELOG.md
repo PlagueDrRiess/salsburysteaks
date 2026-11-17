@@ -4,6 +4,16 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.26
+
+### Controller rumble (issue 22)
+- DualShock 4 and DualSense controllers rumble now. SDL only sends rumble to them in its enhanced mode, which was
+  off, so they stayed still (most of all over Bluetooth).
+- A controller that won't take rumble through SDL (some third-party pads that present themselves as a Switch Pro
+  Controller) gets it through XInput as well, if it also shows up there. The log names a controller that refuses.
+- The log now records the game's first real rumble and the first one sent to the controller, so a report shows
+  where it stops.
+
 ## 2026.11.25
 
 ### Objects missing or ghosting for seconds on a fresh install (issues 8 and 18)

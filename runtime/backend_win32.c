@@ -111,6 +111,9 @@ static void sdl_load(void){
   *(FARPROC*)&sdl_gctype=GetProcAddress(h,"SDL_GameControllerTypeForIndex");   /* SDL 2.0.9+; optional: no rumble without it */
   sdl_sethint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS","0");   /* positions, not printed labels */
   sdl_sethint("SDL_JOYSTICK_HIDAPI_PS4","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_PS5","1");
+  /* PlayStation pads only rumble in SDL's "enhanced" reports, which are off by default over Bluetooth: without these a
+     DualShock 4 or DualSense never rumbled (issue 22) */
+  sdl_sethint("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE","1");
   sdl_sethint("SDL_JOYSTICK_HIDAPI_SWITCH","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_JOY_CONS","1"); sdl_sethint("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS","1");
   sdl_sethint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS","1");
   /* We poll from the game's input thread, not the thread that started SDL, and pump events only once a second.
@@ -806,9 +809,16 @@ void video_poll(void){
     unsigned short ulo=(unsigned short)(lo*65535.0f), uhi=(unsigned short)(hi*65535.0f);
     if(ulo!=plo || uhi!=phi || ((ulo||uhi) && now-last>100000000ull)){ plo=ulo; phi=uhi; last=now;
       extern int g_opt_ctrl_index;
+      int refused=0;
       if(sdl_ok && sdl_gcrumble){ int first= g_opt_ctrl_index>0? g_opt_ctrl_index-1 : 0, lastp= g_opt_ctrl_index>0? g_opt_ctrl_index : sdl_npad;
-        for(int i=first;i<lastp && i<sdl_npad;i++) sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0); }
-      if(xset && g_xpad>=0){ XVIB v={ulo,uhi}; xset((DWORD)g_xpad,&v); } } }
+        for(int i=first;i<lastp && i<sdl_npad;i++){ int rc=sdl_gcrumble(sdl_pad[i],ulo,uhi,ulo||uhi? 250 : 0);
+          if(rc!=0 && (ulo||uhi)){ refused=1; static void* said[8]; static int ns; int k=0; for(;k<ns;k++) if(said[k]==sdl_pad[i]) break;
+            if(k==ns && ns<8){ said[ns++]=sdl_pad[i]; LOG("input: %s refused rumble through SDL (its mode may not support it): trying XInput too\n",sdl_gcname(sdl_pad[i])? sdl_gcname(sdl_pad[i]) : "a controller"); } } } }
+      { static int said; if(!said && (ulo||uhi)){ said=1; LOG("input: first rumble sent to the controller (%u low / %u high of 65535)\n",ulo,uhi); } }
+      /* the XInput pad input came from; when SDL refused (a pad in a mode SDL can't rumble, e.g. some third-party pads
+         seen as a Switch Pro Controller), every connected XInput pad */
+      if(xset && g_xpad>=0){ XVIB v={ulo,uhi}; xset((DWORD)g_xpad,&v); }
+      else if(xset && refused){ XVIB v={ulo,uhi}; for(DWORD xi=0;xi<4;xi++) xset(xi,&v); } } }
   g_pad.buttons=b; g_pad.lx=lx; g_pad.ly=ly; g_pad.rx=rx; g_pad.ry=ry;
 }
 
