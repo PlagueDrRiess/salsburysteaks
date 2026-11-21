@@ -45,6 +45,14 @@ void backend_ini(const char* k, const char* v){
   else if(!strcmp(k,"shot")) strncpy(g_shot,v,1023);
   else if(!strcmp(k,"script")) {strncpy(g_script,v,sizeof g_script-1);g_script[sizeof g_script-1]=0;}
   else if(!strcmp(k,"renderer")){ if(getenv("SWR_RENDERER")) v=getenv("SWR_RENDERER");   /* test boots: the renderer without editing the ini */
+    /* Radeon RX cards (RX 7800 XT, RX 9070 XT, 2026-11 reports): AMD's OpenGL driver crashes on a thread of its own a
+       few seconds after boot (atio6axx.dll, invalid memory access), with OpenGL and Vulkan output alike, while native
+       Vulkan ran the same card for minutes without trouble. They use native Vulkan; integrated Radeon graphics (Legion
+       Go and other APUs) run OpenGL and stay on it. SWR_AMD_OPENGL=1 keeps OpenGL */
+    if(!getenv("SWR_RENDERER") && !getenv("SWR_AMD_OPENGL") && (!strcmp(v,"opengl") || !strcmp(v,"vulkan"))){
+      DISPLAY_DEVICEA dd; memset(&dd,0,sizeof dd); dd.cb=sizeof dd; int rx=0;
+      for(DWORD i=0; EnumDisplayDevicesA(NULL,i,&dd,0); i++){ if((dd.StateFlags&DISPLAY_DEVICE_PRIMARY_DEVICE) && (strstr(dd.DeviceString,"Radeon RX") || strstr(dd.DeviceString,"Radeon(TM) RX"))) rx=1; memset(&dd,0,sizeof dd); dd.cb=sizeof dd; }
+      if(rx){ LOG("renderer: %s on a Radeon RX card: AMD's OpenGL driver crashes there, so native Vulkan is used (SWR_AMD_OPENGL=1 keeps OpenGL)\n",v); v="vulkan_native"; } }
     g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
 }
 

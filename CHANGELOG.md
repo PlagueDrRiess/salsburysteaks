@@ -4,6 +4,15 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.28
+
+### Radeon RX cards start the game (issues 1, 11, 16, 26)
+On Radeon RX cards (RX 7800 XT and RX 9070 XT in the reports) AMD's OpenGL driver crashes a few seconds after boot,
+on a thread of its own, with OpenGL and with Vulkan output. The same card plays fine with Native Vulkan, so the
+game now uses Native Vulkan on Radeon RX cards automatically, and the log says so. Integrated Radeon graphics (Legion
+Go and other handhelds and laptops) stay on OpenGL, which works there. `SWR_AMD_OPENGL=1` keeps OpenGL. Please report
+whether it starts for you.
+
 ## 2026.11.27
 
 ### Shaders from a real playthrough, built before you meet them
