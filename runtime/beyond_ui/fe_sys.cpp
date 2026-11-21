@@ -457,6 +457,10 @@ void pads_init() {
         {"SDL_JOYSTICK_HIDAPI_SWITCH", "1"}, {"SDL_JOYSTICK_HIDAPI_JOY_CONS", "1"}, {"SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS", "1"},
         {"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1"}, {"SDL_JOYSTICK_RAWINPUT", "0"}, {"SDL_JOYSTICK_THREAD", "1"}};
     for (auto& h : hints) s_hint(h[0], h[1]);
+    // DirectInput asks every input device for its name; one that never answers (a broken virtual gamepad driver, seen
+    // 2026-11-20) froze the launcher before its window drew. XInput and SDL's own drivers cover Xbox, PlayStation and
+    // Switch pads; SWR_DIRECTINPUT=1 brings DirectInput back for older generic pads
+    if (!getenv("SWR_DIRECTINPUT")) s_hint("SDL_DIRECTINPUT_ENABLED", "0");
     s_ok = s_init(0x00002000u | 0x00000200u) == 0;
 }
 void pads_shutdown() {

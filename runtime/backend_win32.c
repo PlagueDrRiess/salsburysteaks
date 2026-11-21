@@ -120,6 +120,10 @@ static void sdl_load(void){
      RawInput (SDL's default for XInput pads) only updates through window messages, so it would see no presses:
      use the XInput backend for those pads and let SDL service device messages on its own thread. */
   sdl_sethint("SDL_JOYSTICK_RAWINPUT","0"); sdl_sethint("SDL_JOYSTICK_THREAD","1");
+  /* DirectInput asks every input device for its name; one that never answers (a broken virtual gamepad driver,
+     2026-11-20) froze startup. XInput and SDL's own drivers cover Xbox, PlayStation and Switch pads;
+     SWR_DIRECTINPUT=1 brings DirectInput back for older generic pads */
+  if(!getenv("SWR_DIRECTINPUT")) sdl_sethint("SDL_DIRECTINPUT_ENABLED","0");
   if(sdl_init(0x00002000u|0x00000200u)!=0){ LOG("input: SDL2 could not start, using XInput\n"); return; }   /* GAMECONTROLLER|JOYSTICK */
   sdl_ok=1; LOG("input: SDL2 controllers active (XInput pads also read)\n"); }
 /* the kind of controller player 1 has, for the button icons (svc_fs.c), asked before the window and the input thread

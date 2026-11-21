@@ -1322,17 +1322,21 @@ static void translated_save(u64 key,const ShaderInfo*si,const char*src){
 typedef struct { u64 h; u32 stage, key2, m[6], ndep; TransDep dep[TDEP_MAX]; } ShAnswer;
 static u64* g_ans_seen; static u32 g_ans_seen_n; static int g_ans_loaded;
 static u64 ans_id(const ShAnswer* a){ return fast_hash((const u8*)a,offsetof(ShAnswer,dep)+a->ndep*sizeof(TransDep),0)|1; }
-static int ans_seen_put(u64 id){ u32 i=(u32)(id^(id>>29))&0xFFFF; for(u32 n=0;n<0x10000;n++,i=(i+1)&0xFFFF){ if(g_ans_seen[i]==id) return 0; if(!g_ans_seen[i]){ g_ans_seen[i]=id; g_ans_seen_n++; return 1; } } return 0; }
+#define ANS_TAB 0x40000   /* the ids kept: every shader variant a play met, not only the jump-table ones */
+static int ans_seen_put(u64 id){ u32 i=(u32)(id^(id>>29))&(ANS_TAB-1); for(u32 n=0;n<ANS_TAB;n++,i=(i+1)&(ANS_TAB-1)){ if(g_ans_seen[i]==id) return 0; if(!g_ans_seen[i]){ g_ans_seen[i]=id; g_ans_seen_n++; return 1; } } return 0; }
 static int ans_read(FILE* f, ShAnswer* a){ u32 mg; if(fread(&mg,4,1,f)!=1 || mg!=0x41525753u || fread(a,offsetof(ShAnswer,dep),1,f)!=1 || a->ndep>TDEP_MAX || fread(a->dep,sizeof(TransDep),a->ndep,f)!=a->ndep) return 0; return 1; }
 static void ans_masks(ShAnswer* a, const ShaderInfo* si){ a->m[0]=si->attr_int_mask; a->m[1]=si->attr_sint_mask; a->m[2]=si->tex_int_mask; a->m[3]=si->tex_sint_mask; a->m[4]=si->rt_int_mask; a->m[5]=si->rt_sint_mask; }
 static void ans_unmask(const ShAnswer* a, ShaderInfo* si){ si->attr_int_mask=a->m[0]; si->attr_sint_mask=a->m[1]; si->tex_int_mask=a->m[2]; si->tex_sint_mask=a->m[3]; si->rt_int_mask=a->m[4]; si->rt_sint_mask=a->m[5]; }
-/* GL thread, at a draw's new shader: keep what a jump-table translation read (new ones only; also those found translated
-   from before answers were kept, so a cache made earlier still gives its answers) */
+/* GL thread, at a draw's new shader: keep the variant it was (hash, stage, variant masks) and what a jump-table
+   translation read (new ones only; also those found in the translated cache, so playing with a cache made earlier
+   still lists them). The file is the list of every variant play met: the shader list a release ships
+   (beyond/shader-list.bin, installed as recompiler/beyond/shader-list.bin), which seed_ans_pass builds ahead from the
+   player's own game files */
 static void ans_record(u64 h, int stage, u32 key2, const ShaderInfo* in, u32 ndep, const TransDep* dep){
-  static int off=-1; if(off<0) off=getenv("SWR_NO_SHADER_ANSWERS")!=NULL; if(off || !ndep || ndep>TDEP_MAX) return;
-  if(!g_ans_loaded){ g_ans_loaded=1; g_ans_seen=calloc(0x10000,8); if(!g_ans_seen){ off=1; return; }
+  static int off=-1; if(off<0) off=getenv("SWR_NO_SHADER_ANSWERS")!=NULL; if(off || ndep>TDEP_MAX) return;
+  if(!g_ans_loaded){ g_ans_loaded=1; g_ans_seen=calloc(ANS_TAB,8); if(!g_ans_seen){ off=1; return; }
     FILE* f=fopen(ANSWERS_PATH,"rb"); if(f){ static ShAnswer r; while(ans_read(f,&r)) ans_seen_put(ans_id(&r)); fclose(f); } }
-  if(g_ans_seen_n>=60000) return;
+  if(g_ans_seen_n>=ANS_TAB*3/4) return;
   static ShAnswer a; memset(&a,0,sizeof a); a.h=h; a.stage=(u32)stage; a.key2=key2; ans_masks(&a,in); a.ndep=ndep; memcpy(a.dep,dep,ndep*sizeof(TransDep));
   if(!ans_seen_put(ans_id(&a))) return;
   u8 b[4+sizeof a]; u32 mg=0x41525753u; size_t n=offsetof(ShAnswer,dep)+ndep*sizeof(TransDep); memcpy(b,&mg,4); memcpy(b+4,&a,n);
@@ -1450,7 +1454,7 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
   u64 trans_start=plat_ns();u64 trans_key=translated_key(h,stage,key2,&s->si);Translated*cached=translated_get(trans_key);
   char*src=NULL;trans_ndep=0;trans_overflow=0; ShaderInfo ans_in=s->si;
   if(cached && cached->si.unsupported) cached=NULL;   /* translated before the translator could: try again */
-  if(cached && cached->ndep) ans_record(h,stage,key2,&ans_in,cached->ndep,cached->dep);
+  if(cached) ans_record(h,stage,key2,&ans_in,cached->ndep,cached->dep);
   if(cached){s->si=cached->si;src=malloc(strlen(cached->src)+1);strcpy(src,cached->src);}
   else {g_shader_cb_read=trans_cb_read;src=shader_to_glsl(code,0x10000,stage,&s->si);g_shader_cb_read=sh_cb_read;}
   if(cached)shader_reuse_ns+=plat_ns()-trans_start;else shader_translate_ns+=plat_ns()-trans_start;
@@ -1468,7 +1472,7 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
       snprintf(fp,sizeof fp,"captures/failed/%016llx_%s.bin",(unsigned long long)h,stage==ST_VS?"vs":"fs"); aw_write(fp,code,0x10000,0);
       LOG("shader %016llx saved to %s (send it so the missing texture can be analyzed)\n",(unsigned long long)h,fp); } }
   if(!cached){src=sh_post(src,stage);if(stage==ST_FS)src=sh_nan_guard(src);translated_save(trans_key,&s->si,src);
-    if(src && !trans_overflow && trans_ndep) ans_record(h,stage,key2,&ans_in,trans_ndep,trans_dep);}
+    if(src && !trans_overflow) ans_record(h,stage,key2,&ans_in,trans_ndep,trans_dep);}
   if(stage==ST_FS) src=sh_dbg(src,h);
   if(stage==ST_FS) src=sh_view(src,h);
   GLenum ty= stage==ST_VS? GL_VERTEX_SHADER : stage==ST_FS? GL_FRAGMENT_SHADER : stage==ST_GS? GL_GEOMETRY_SHADER : stage==ST_CS? GL_COMPUTE_SHADER : stage==ST_TCS? GL_TESS_CONTROL_SHADER : GL_TESS_EVALUATION_SHADER;
@@ -4959,13 +4963,18 @@ static void sq_push(const SeedTr* t){
    the helper processes have its program built already (seed_ans_job) */
 static void seed_ans_pass(void){
   if(getenv("SWR_NO_SHADER_ANSWERS")) return;
-  FILE* f=fopen(ANSWERS_PATH,"rb"); if(!f) return;
+  /* this install's own list, and the release's shader list (make_release.py ships beyond/shader-list.bin as
+     recompiler/beyond/shader-list.bin, in the update zip too) */
+  char listp[1200]; snprintf(listp,sizeof listp,"%srecompiler/beyond/shader-list.bin",g_exedir);
+  const char* lists[2]={ANSWERS_PATH,listp};
+  { FILE* t0f=fopen(lists[0],"rb"), *t1f=fopen(lists[1],"rb"); int any= t0f||t1f; if(t0f) fclose(t0f); if(t1f) fclose(t1f); if(!any) return; }
   u64* done=calloc(1u<<18,8);   /* ids done before, open addressing */
   { FILE* d=fopen(ANS_DONE_PATH,"rb"); if(d){ u64 id; while(done && fread(&id,8,1,d)==1){ u32 q=(u32)(id^(id>>29))&0x3FFFF; while(done[q] && done[q]!=id) q=(q+1)&0x3FFFF; done[q]=id; } fclose(d); } }
   u32* hidx=calloc(1u<<18,4);   /* seed index+1 by hash and stage */
   if(hidx) for(u32 i=0;i<g_seed_n;i++){ u64 k=(g_seed[i].h^(u64)(g_seed[i].stage+1))|1; u32 j=(u32)(k^(k>>31))&0x3FFFF; while(hidx[j]) j=(j+1)&0x3FFFF; hidx[j]=i+1; }
   u8* code=malloc(0x10000+64); FILE* sf=fopen("shader_cache/seed.bin","rb");
   static ShAnswer a; u32 n=0, made=0, nomatch=0, failed=0, had=0; u64 t0=plat_ns(); FILE* df=fopen(ANS_DONE_PATH,"ab");
+  for(int li=0;li<2;li++){ FILE* f=fopen(lists[li],"rb"); if(!f) continue;
   while(code && sf && hidx && done && ans_read(f,&a)){ n++; u64 id=ans_id(&a); int seen=0; { u32 q=(u32)(id^(id>>29))&0x3FFFF; while(done[q] && done[q]!=id) q=(q+1)&0x3FFFF; seen= done[q]==id; if(!seen && n<0x30000) done[q]=id; } if(seen){ had++; continue; }
     if(df) fwrite(&id,8,1,df);
     u64 k=(a.h^(u64)(a.stage+1))|1; u32 j=(u32)(k^(k>>31))&0x3FFFF; SeedEnt* e=NULL;
@@ -4978,8 +4987,9 @@ static void seed_ans_pass(void){
     src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src);
     static SeedTr t; t.tk=tk; t.stage=stage; t.idx=0; t.si=si; t.src=src; t.ndep=t_seed_ndep; memcpy(t.dep,t_seed_dep,t_seed_ndep*sizeof(TransDep)); t.ans=1;
     sq_push(&t); made++; }
-  if(df) fclose(df); if(sf) fclose(sf); free(code); free(hidx); free(done); fclose(f);
-  LOG("shaders: shader answers: %u kept, %u translated ahead now, %u done before, %u not in the game files, %u failed, %.1f s\n",n,made,had,nomatch,failed,(plat_ns()-t0)/1e9); }
+  fclose(f); }
+  if(df) fclose(df); if(sf) fclose(sf); free(code); free(hidx); free(done);
+  LOG("shaders: shader list (this install's and the release's): %u variants, %u translated ahead now, %u done before, %u not in the game files, %u failed, %.1f s\n",n,made,had,nomatch,failed,(plat_ns()-t0)/1e9); }
 static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-translate"); plat_thread_low_priority();
   while(!__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE)) plat_sleep_ns(200000000);
   g_seed_ok=calloc(g_seed_n+1,1); if(!g_seed_ok) return;

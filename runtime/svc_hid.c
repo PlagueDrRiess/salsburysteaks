@@ -129,9 +129,14 @@ static u64 g_hold_type=0, g_comm_mode=0, g_handheld_mode=0;
    index: 0 left, 1 right) as {low amplitude, low frequency, high amplitude, high frequency}. The backends read it as
    a standard pad's two motors (hid_rumble_get) */
 int g_opt_rumble=100;   /* ini [Input] rumble: strength in percent, 0 = off */
-static volatile float g_vib[2][4]; static volatile u64 g_vib_ns[2]; static u64 g_vib_n;
+/* kept per whole handle: the game sends values for every pad style it set up (handheld, full key, both Joy-Con sides)
+   in one go, and with only two slots the zeros for the styles not in use overwrote the real rumble at once, so a
+   DualSense never rumbled (2026-11-20). The pad takes the strongest of all handles refreshed lately */
+#define VIB_N 16
+static volatile float g_vib[VIB_N][4]; static volatile u64 g_vib_ns[VIB_N]; static u32 g_vib_h[VIB_N]; static int g_vib_hn; static u64 g_vib_n;
 static void vib_set(u32 handle, const float* v){
-  u32 dev=(handle>>16)&0xFF; if(dev>1) dev=1;
+  int dev=-1; for(int i=0;i<g_vib_hn;i++) if(g_vib_h[i]==handle){ dev=i; break; }
+  if(dev<0){ if(g_vib_hn<VIB_N){ dev=g_vib_hn; g_vib_h[g_vib_hn++]=handle; } else dev=VIB_N-1; }
   for(int i=0;i<4;i++) g_vib[dev][i]= v[i]==v[i] && v[i]>0? v[i] : 0;   /* NaN or negative: silent */
   g_vib_ns[dev]=plat_ns();
   if(!g_vib_n++) LOG("input: the game sent its first rumble (amplitudes %.2f low / %.2f high)\n",v[0],v[2]);
@@ -140,7 +145,7 @@ static void vib_set(u32 handle, const float* v){
    the stronger high band. A side not refreshed for 200 ms counts as stopped (the game stops sending when it ends) */
 void hid_rumble_get(float* lo, float* hi){
   u64 now=plat_ns(); float l=0, h=0;
-  for(int d=0;d<2;d++){ if(!g_vib_ns[d] || now-g_vib_ns[d]>200000000ull) continue; if(g_vib[d][0]>l) l=g_vib[d][0]; if(g_vib[d][2]>h) h=g_vib[d][2]; }
+  for(int d=0;d<VIB_N;d++){ if(!g_vib_ns[d] || now-g_vib_ns[d]>200000000ull) continue; if(g_vib[d][0]>l) l=g_vib[d][0]; if(g_vib[d][2]>h) h=g_vib[d][2]; }
   float s= g_opt_rumble>0? g_opt_rumble/100.0f : 0; l*=s; h*=s;
   *lo= l>1? 1 : l; *hi= h>1? 1 : h; }
 
@@ -179,8 +184,9 @@ static int hid_disp(SvcObj* o, IpcCtx* c){
     case 201: { float v[4]; for(int i=0;i<4;i++){ u32 w=in32(c,4+4*i); memcpy(&v[i],&w,4); } vib_set(in32(c,0),v); return 0; }   /* SendVibrationValue(handle, value, aruid) */
     case 206: if(c->nx>=2){ u64 nh=c->x[0].size/4, nv=c->x[1].size/16, n= nh<nv? nh : nv;   /* SendVibrationValues(aruid, handles[], values[]) */
         for(u64 i=0;i<n && i<8;i++){ float v[4]; memcpy(v,GP(c->x[1].addr+i*16),16); vib_set(gr32(c->x[0].addr+i*4),v); } } return 0;
-    case 202: { u32 h=in32(c,0), dev=(h>>16)&0xFF; if(dev>1) dev=1;   /* GetActualVibrationValue: what was last sent */
-      float v[4]={g_vib[dev][0], g_vib[dev][1]>0? g_vib[dev][1] : 160.f, g_vib[dev][2], g_vib[dev][3]>0? g_vib[dev][3] : 320.f}; outbytes(c,v,16); return 0; }
+    case 202: { u32 h=in32(c,0); int dev=-1; for(int i=0;i<g_vib_hn;i++) if(g_vib_h[i]==h){ dev=i; break; }   /* GetActualVibrationValue: what was last sent */
+      float v[4]={0,160.f,0,320.f}; if(dev>=0){ v[0]=g_vib[dev][0]; v[1]=g_vib[dev][1]>0? g_vib[dev][1] : 160.f; v[2]=g_vib[dev][2]; v[3]=g_vib[dev][3]>0? g_vib[dev][3] : 320.f; }
+      outbytes(c,v,16); return 0; }
     case 203: out_obj(c,svcobj_new("IActiveVibrationDeviceList",hid_vibration_list,0)); return 0;
     case 205: case 211: out8(c,1); return 0;                                       /* IsVibrationPermitted / Mounted */
     case 208: out32(c,0); return 0;

@@ -4,6 +4,25 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.27
+
+### Shaders from a real playthrough, built before you meet them
+The game now notes every shader variant it draws, and this release ships the list from a playthrough (about 1,500
+variants: IDs and a few table values, no game code). At each start the game builds the ones it can from your own
+game files in the background, before the areas that use them, so fewer objects are missing or ghosting the first
+time you see them. The list grows with later releases.
+
+### Controller rumble really works now (issue 22)
+The game sends rumble for every controller slot at once (handheld, full controller, both Joy-Con sides). The empty
+slots overwrote the real rumble straight away, so nothing reached the controller. Each slot is kept apart now and
+the controller gets the strongest.
+
+### No freeze at start with a misbehaving controller driver
+The launcher and the game asked Windows' DirectInput for the name of every input device; one that never answered
+(a broken virtual gamepad driver) froze them before the window appeared. Controllers are now found through XInput
+and SDL's own drivers, which cover Xbox, PlayStation and Switch pads. `SWR_DIRECTINPUT=1` brings DirectInput back
+for older generic pads.
+
 ## 2026.11.26
 
 ### Controller rumble (issue 22)
