@@ -159,14 +159,24 @@ static void pl_scan(void){ u64 found=0; int n=0;
   for(u64 a=HEAP_BASE;a<ALIAS_BASE;){ MemBlock b; mem_query(a,&b); if(!b.size) break; u64 end=b.addr+b.size; if(end<=a) break;
     if((b.perm&PERM_R)&&(b.perm&PERM_W)){ u64 p=(a+3)&~3ull;
       for(u64 o=p;o+4<=end;o+=4){ if(*(const u32*)GP(o)==0x44BB6000u && o>=0x1D8+HEAP_BASE && pl_valid(o-0x10-0x1C8)){ found=o-0x10-0x1C8; n++; }
-        if(!(o&0xFFFFF)) plat_sleep_ns(100000); } }   /* a breath per MB: this runs beside the game */
+        if(!(o&0x7FFFFF)) plat_sleep_ns(1000000); } }   /* 1 ms per 8 MB: this runs beside the game, gently */
     a=end; }
   if(found){ g_pl_base=found; LOG("cheats: player table at %llx (%d match%s)\n",(unsigned long long)found,n,n==1?"":"es"); } }
+static volatile int g_pl_again;   /* cheats toggled or reloaded: look again even after giving up */
 static void pl_thread(void* arg){ (void)arg; plat_thread_low_priority();
-  /* a failed look takes a third of a core (MEASURED 2026-11-09, the intro: its limits don't match, so it never finds one):
-     wait longer after each, up to a minute */
-  long long wait=5;
-  for(;;){ if(g_pl_want && !g_pl_base){ g_pl_want=0; pl_scan(); wait= g_pl_base? 5 : wait<60? wait*2 : 60; } plat_sleep_ns(wait*1000000000ll); } }
+  /* a failed look takes a third of a core (MEASURED 2026-11-09, the intro: its limits don't match, so it never finds one)
+     and reads the whole 6 GB heap: every minute for hours, with Windows paging parts of it out, it made the game stutter
+     after a while with cheats on (issue 30, 2026-11-22). Now it gives up after 3 failed looks and logs that once, and
+     looks again when cheats are toggled or reloaded, or after 10 minutes */
+  long long wait=5; int fails=0; u64 gave_up=0;
+  for(;;){
+    if(g_pl_again){ g_pl_again=0; fails=0; gave_up=0; wait=5; }
+    if(gave_up && plat_ns()-gave_up>600000000000ull){ fails=0; gave_up=0; wait=5; }
+    if(g_pl_want && !g_pl_base && !gave_up){ g_pl_want=0; pl_scan();
+      if(g_pl_base){ fails=0; wait=5; }
+      else if(++fails>=3){ gave_up=plat_ns(); static int said; if(said<4){ said++; LOG("cheats: player table not found after 3 looks: the cheats that need it do nothing for now (looked for again when cheats change, or in 10 minutes)\n"); } }
+      else wait= wait<60? wait*2 : 60; }
+    plat_sleep_ns(wait*1000000000ll); } }
 static u64 region(int m){
   if(m==4){ if(g_pl_base) return g_pl_base; g_pl_want=1; if(!g_pl_thread){ g_pl_thread=1; plat_thread(pl_thread,NULL,1<<20); } return PL_NOWHERE; }
   return m==0? g_main_base : m==1? HEAP_BASE : m==2? ALIAS_BASE : g_aslr_base; }
@@ -436,6 +446,6 @@ void cheats_tick(void){
 int cheats_count(void){ lock(); ids(); if(!g_mt_txt && !g_nch) load(); int n=(int)g_nch; unlock(); return n; }
 int cheats_info(int i, char* name, int cap, int* on, int* master){
   lock(); int ok= i>=0 && (u32)i<g_nch; if(ok){ snprintf(name,(size_t)cap,"%s",g_ch[i].name); *on=g_ch[i].on; *master=g_ch[i].master; } unlock(); return ok; }
-void cheats_set(int i, int on){ lock(); if(i>=0 && (u32)i<g_nch && !g_ch[i].master){ g_ch[i].on=on!=0; save_enabled(); } unlock(); }
+void cheats_set(int i, int on){ lock(); if(i>=0 && (u32)i<g_nch && !g_ch[i].master){ g_ch[i].on=on!=0; save_enabled(); } g_pl_again=1; unlock(); }
 const char* cheats_path(void){ lock(); ids(); unlock(); return g_path; }
-void cheats_reload(void){ lock(); ids(); load(); g_fov_loaded=0; unlock(); }
+void cheats_reload(void){ lock(); ids(); load(); g_fov_loaded=0; g_pl_again=1; unlock(); }

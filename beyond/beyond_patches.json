@@ -237,6 +237,33 @@
      ]
     ]
    ]
+  },
+  "code_155.c": {
+   "pristine": "ac2e47d7c809a97e29eddcdddd7ad874455eafea3c419b28916f67726bea8b72",
+   "result": "592b72812ff580f05812c6f98cf022f635a82807f7057e8b1161a1dbd6bee913",
+   "hunks": [
+    [
+     29798,
+     29798,
+     [
+      " c->rt->svc(c,0xFFEA);"
+     ]
+    ],
+    [
+     30610,
+     30610,
+     [
+      " c->rt->svc(c,0xFFE9);"
+     ]
+    ],
+    [
+     33529,
+     33529,
+     [
+      " c->rt->svc(c,0xFFE3);"
+     ]
+    ]
+   ]
   }
  }
 }

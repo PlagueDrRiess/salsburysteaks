@@ -722,6 +722,14 @@ static void mouse_test(LONG* dx, LONG* dy){
 static u64 mouse_bits(void){
   extern int g_opt_mouse_aim; if(!g_opt_mouse_aim || ov_is_open()) return 0;
   LONG btn=g_mbtn|g_mtest_btn; u64 k=0;
+  /* menus (the title, file select, pause, loading): the left button is A and the right one B, so the menus work by
+     clicking (2026-11-22: "I should not have to hit E each time"). A menu is when the game's gameplay camera hasn't run
+     for 250 ms (svc_hid.c aim_cam_hook) and ZL isn't held: locked onto an enemy the camera stops too, and there the
+     buttons must keep shooting */
+  { extern volatile unsigned long long g_cam_seen_ns; extern u64 g_pad_buttons_now; u64 cs=g_cam_seen_ns;
+    if((!cs || plat_ns()-cs>250000000ull) && !((g_pad_buttons_now>>8)&1)){   /* !cs: no gameplay yet (title, file select) */
+      if(btn&1) k|=1ull<<0; if(btn&2) k|=1ull<<1; for(int i=2;i<5;i++) if(btn>>i&1) k|=g_bind_mouse[i];
+      return k; } }
   for(int i=0;i<5;i++) if(btn>>i&1) k|=g_bind_mouse[i];
   /* the game's Pointer scheme shoots with A, not ZR (2026-11-14: left click did nothing there): with the mouse driving
      the motion sensor, a mouse button bound to ZR presses A instead, so the same click fires in both schemes */
@@ -740,7 +748,17 @@ static void mouse_apply(i32* rx, i32* ry){
   /* mouse_mode=raw: while the camera's own turn runs (svc_hid.c raw_apply, used in the last 100 ms) the counts go to it,
      1:1, and the stick is left alone. Where it doesn't run, the mouse drives the stick as in stick mode */
   { extern int g_opt_mouse_mode; extern volatile long long g_raw_mx, g_raw_my; extern volatile unsigned long long g_raw_used_ns;
-    if(g_opt_mouse_mode==2 && g_raw_used_ns && now-g_raw_used_ns<100000000ull){
+    /* while ZL (lock-on) is held the mouse moves the game's free-aim reticle, which reads the stick: locked onto an
+       enemy the camera turn stops anyway, and in a lock without a target (strafing) the camera ignores a turn, so the
+       raw counts did nothing there (2026-11-22, the player's report) */
+    extern u64 g_pad_buttons_now; int locking= (g_pad_buttons_now>>8)&1;
+    if(locking && g_opt_mouse_mode==2){ __atomic_store_n(&g_raw_mx,0,__ATOMIC_RELAXED); __atomic_store_n(&g_raw_my,0,__ATOMIC_RELAXED);
+      /* the reticle itself, 1:1 like the camera (svc_hid.c aim_look_hook), while the aim update runs; else the stick */
+      extern volatile long long g_ret_mx, g_ret_my; extern volatile unsigned long long g_ret_seen_ns;
+      if(g_ret_seen_ns && now-g_ret_seen_ns<100000000ull){
+        if(dx||dy){ __atomic_fetch_add(&g_ret_mx,(long long)dx,__ATOMIC_RELAXED); __atomic_fetch_add(&g_ret_my,(long long)dy,__ATOMIC_RELAXED); }
+        vx=vy=0; return; } }
+    if(g_opt_mouse_mode==2 && !locking && g_raw_used_ns && now-g_raw_used_ns<100000000ull){
       if(dx||dy){ __atomic_fetch_add(&g_raw_mx,(long long)dx,__ATOMIC_RELAXED); __atomic_fetch_add(&g_raw_my,(long long)dy,__ATOMIC_RELAXED); }
       static int said; if(!said){ said=1; LOG("input: raw mouse aim in use (the mouse turns the camera itself)\n"); }
       vx=vy=0; return; } }

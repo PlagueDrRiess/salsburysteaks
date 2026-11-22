@@ -515,12 +515,13 @@ static u64 g_upl_t0;
 static u64 st_tchk_ns, st_tupl_ns, st_tb_lookup, st_tb_samp, st_tb_rest, st_tb_bind, st_tb_crop, st_tb_lay, st_tb_vol, st_tb_pre;   /* texture time split: change-check hashing, uploads */
 static void tex_upload_(Tex* t);
 static void tex_upload(Tex* t){ u64 t0=plat_ns(); tex_upload_(t); st_tupl_ns+=plat_ns()-t0; }
-static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t->size; u64 upload_start=plat_ns(), upload_read_ns=0, upload_unpack_ns=0, upload_decode_ns=0, upload_driver_ns=0, upload_wait_ns=0, upload_scan_ns=0, upload_stage;
+static u64 st_tex_up_astc, st_tex_up_px;   /* heavy_frame_note: of the uploads, ASTC (guest bytes) and the decoded pixels they become */
+static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t->size; if(t->f.astc){ st_tex_up_astc+=t->size; st_tex_up_px+=(u64)t->w*t->h*(t->d? t->d : 1)*4; } u64 upload_start=plat_ns(), upload_read_ns=0, upload_unpack_ns=0, upload_decode_ns=0, upload_driver_ns=0, upload_wait_ns=0, upload_scan_ns=0, upload_stage;
   if(tex_zero_height_fix(t)) return;
   t->agen++; aj_forget(t); int a_async=0;
   /* ASTC arrays: the leading levels over 32x32 of every layer decode in the background as well (Prime 4 streams
      256x256x64 and 512x512x16 arrays while you walk: 10-25 ms each on this thread, a hitch per texture) */
-  int a_arr=0; if(t->f.astc && t->target==GL_TEXTURE_2D_ARRAY && t->levels>1 && !astc_gpu_on() && aj_on()){ while(a_arr+1<(int)t->levels && (u64)(t->w>>a_arr)*(t->h>>a_arr)>32u*32u) a_arr++; }   /* each layer of a level is its own job: down to 64x64, a layer is small enough that only the job count matters */
+  int a_arr=0; { static int gall=-1; if(gall<0) gall=getenv("SWR_ASTC_SPLIT")==NULL; if(t->f.astc && t->target==GL_TEXTURE_2D_ARRAY && t->levels>1 && (!astc_gpu_on() || !gall) && aj_on()){ while(a_arr+1<(int)t->levels && (u64)(t->w>>a_arr)*(t->h>>a_arr)>32u*32u) a_arr++; }   /* each layer of a level is its own job: down to 64x64, a layer is small enough that only the job count matters */ }
   { static int said; t->nup++; if(said<4000 && getenv("SWR_TRACE_UPLOADS") && plat_ns()-g_upl_t0>(u64)atoi(getenv("SWR_TRACE_UPLOADS"))*1000000000ull){ said++; LOG("texture upload %ux%ux%u levels %u fkey %x %llu KB (upload %u)\n",t->w,t->h,t->d,t->levels,t->fkey,(unsigned long long)t->size>>10,t->nup); } }
   { static int e=-1; if(e<0){ e=getenv("SWR_UPLOAD_COPY")!=NULL; if(e) g_upload_direct=0; } }
   const GlFmt* f=&t->f;
@@ -563,7 +564,14 @@ static void tex_upload_(Tex* t){ if(!g_upl_t0) g_upl_t0=plat_ns(); st_tex_up+=t-
       else { for(u32 y=0;y<th;y++) memcpy(lin+(u64)y*rowb,src+(u64)y*t->pitch,rowb); }
       upload_unpack_ns+=plat_ns()-upload_stage; upload_stage=plat_ns();
       const u8* up=lin; u8* dec=NULL;
-      if(f->astc && t->target!=GL_TEXTURE_1D && astc_gpu_on()){   /* decoded on the GPU into a pixel buffer, filled from it at once (astc_gl.inc) */
+      /* the large levels of an ASTC texture decode in the background even with the GPU decoder (2026-11-22): an area load
+         brings 117 MB of ASTC at once, 450 MB of pixels, and the GPU decoder took 250-290 ms of GPU time for it in one
+         frame (the swap after it: VRAM +1 GB, the GPU at 98%). The small levels still decode here, so the texture shows at
+         once and its sharp levels follow over the next frames (aj_drain). OFF by default: the sharp levels came 0.5 s late on
+         average and 1.4 s at worst, soft textures (glass) the player saw, and the load still took 124 ms. SWR_ASTC_SPLIT=1: on */
+      static int gpu_all=-1; if(gpu_all<0) gpu_all=getenv("SWR_ASTC_SPLIT")==NULL;
+      int go_async= !gpu_all && ((f->astc && t->target==GL_TEXTURE_2D && layers==1 && l+1<t->levels && a_async==(int)l && (u64)lw*lh>128u*128u && aj_on()) || (int)l<a_arr);
+      if(f->astc && t->target!=GL_TEXTURE_1D && astc_gpu_on() && !go_async){   /* decoded on the GPU into a pixel buffer, filled from it at once (astc_gl.inc) */
         astc_gpu_decode(lin,lw,lh,t->target==GL_TEXTURE_3D? ld : 1,f->bw,f->bh);
         upload_decode_ns+=plat_ns()-upload_stage; upload_stage=plat_ns();
         if(t->target==GL_TEXTURE_2D) glTexSubImage2D(GL_TEXTURE_2D,l,0,0,lw,lh,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
@@ -5362,6 +5370,17 @@ static void res_dyn_step(void){
 
 /* end of frame: was it slow, and where did the time go */
 static u64 g_idle_ns;   /* GPU thread waiting for the game's next piece of work */
+/* a frame with a lot of new work (an area loading): what it held, so a slow swap that follows can be told apart:
+   texture or vertex uploads, program binaries loaded, new draw-state combinations (NVIDIA builds a variant for each at
+   its first draw), compiles in the game. SWR_NO_HEAVY_FRAME_LOG=1: off */
+static void heavy_frame_note(void){
+  static int off=-1; if(off<0) off=getenv("SWR_NO_HEAVY_FRAME_LOG")!=NULL; if(off) return;
+  static u64 l_tex, l_vb, l_bin, l_cmp, l_astc, l_px; static u32 l_pipe; static int n;
+  u64 astc=st_tex_up_astc-l_astc, px=st_tex_up_px-l_px; l_astc=st_tex_up_astc; l_px=st_tex_up_px;
+  u64 tex=st_tex_up-l_tex, vb=st_vb_up-l_vb, bin=g_bin_n-l_bin, cmp=g_cmp_n-l_cmp; u32 pipe=g_pipe_new-l_pipe;
+  l_tex=st_tex_up; l_vb=st_vb_up; l_bin=g_bin_n; l_cmp=g_cmp_n; l_pipe=g_pipe_new;
+  if((pipe>=5 || bin>=5 || cmp || tex>(16u<<20) || vb>(16u<<20)) && n<400){ n++;
+    LOG("heavy frame %u: %u new draw states, %llu programs loaded, %llu compiled, %.1f MB textures (%.1f MB ASTC, decoding to %.0f MB of pixels), %.1f MB vertices\n",g_frame,pipe,(unsigned long long)bin,(unsigned long long)cmp,tex/1048576.0,astc/1048576.0,px/1048576.0,vb/1048576.0); } }
 static void frame_stats(void){
   { /* load-screen detector: gameplay draws 200-700 times a frame; loading screens, fades and the intro's video a handful.
        Measured at the end of a frame, so it applies to the next one: after two light frames the next frame may wait for
@@ -5570,9 +5589,9 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
       case WK_SUBMIT: g_submit_epoch++; ww_poll(); { extern volatile u64 g_gpu_sub_ns; static u32 fr=~0u; if(fr!=g_frame || !g_gpu_sub_ns){ fr=g_frame; g_gpu_sub_ns=w.sub_ns; } }   /* stamp the whole frame with the time of its first submit */ { extern u64 guest_ns(void); u64 q0=guest_ns(), p0=plat_ns(); gpu_submit_now(w.ent,w.n,w.syncpt); u64 pd=plat_ns()-p0; static int said;
         if(said<60 && (q0-w.sub_ns>30000000ull || pd>30000000ull)){ said++; LOG("gpu: submit on syncpoint %u waited %.1f ms in the queue, took %.1f ms (%u entries)\n",w.syncpt,(q0-w.sub_ns)/1e6,pd/1e6,w.n); } }
         cs_kick_async(); free(w.ent); cs_submit_done(w.syncpt,w.incs); break;
-      case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; pc_step(); job_grave_step(); tex_del_step(0); aj_drain(); gpu_gl_gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
+      case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; pc_step(); job_grave_step(); tex_del_step(0); aj_drain(); gpu_gl_gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); heavy_frame_note(); trace_frame(); break;
       case WK_PRESENT_ADDR: if(!present_addr(w.addr,w.w,w.h)){ extern void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
-          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; pc_step(); job_grave_step(); tex_del_step(0); dlg_frame(); aj_drain(); gpu_gl_gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
+          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; pc_step(); job_grave_step(); tex_del_step(0); dlg_frame(); aj_drain(); gpu_gl_gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); heavy_frame_note(); trace_frame(); break;
       case WK_SYNC: pm_lock(&g_ql);__atomic_store_n(w.done,1,__ATOMIC_RELEASE);pc_broadcast(&g_frame_consumed_cv);pm_unlock(&g_ql);break;
       case WK_DUMP: if(!getenv("SWR_TEST_NODUMP")) dump_rts(); g_tr_arm=1; break;   /* test only: the trace without the target pictures */
       case WK_SHOT: do_screenshot(w.path[0]? w.path : NULL); __atomic_store_n(&g_shot_done,w.n,__ATOMIC_SEQ_CST); break;

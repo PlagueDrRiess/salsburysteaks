@@ -4,6 +4,31 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.31
+
+### Native mouse aim (issue 28)
+The mouse now turns the camera itself instead of acting as the right stick. Your movement goes straight into the
+game camera's own turn and pitch every frame: no stick curve, no acceleration ramp and no top turning speed, so the view
+goes exactly as far and as fast as your hand. A controller's stick still works alongside it.
+- **Lock-on:** while the lock button is held (right click by default), the mouse moves the free-aim reticle
+  directly, at the same speed as the camera, so the feel and your DPI carry over. The reticle resets on release, as
+  in the game.
+- **Sensitivity:** `mouse_sensitivity` 100 is 0.04 degrees a mouse count, a full turn in about 29 cm at 800 DPI.
+- **Pitch** stops at the game's own limits.
+- **Default:** "Camera, 1:1 (raw mouse)" is the new default in Controls (`mouse_mode=raw`). If you had the old
+  right-stick mode, it switches to raw once; you can pick "Right stick" or "Motion" again any time.
+- The update rebuilds the game code once (a few minutes), since the game code needs three small additions for this.
+
+### Mouse clicks work in the menus
+On the title screen, file select, pause menu and loading screens, left click is A (confirm) and right click is B
+(back), so you no longer need E or Enter there. In play the buttons keep their bindings (shoot, lock on).
+
+### Cheats no longer slow the game down over time (issue 30)
+Cheat codes that work on the player's stats look for their table in the game's memory. When it couldn't be found, the
+search went through the whole 6 GB of game memory again every minute for as long as the game ran, which on long
+sessions turned into stutter. It now stops after three tries and says so in the log, and looks again when you change
+cheats or after 10 minutes. Note too: `fps_limit=0` (unlimited) makes this game run faster and unevenly, so keep 60.
+
 ## 2026.11.30
 
 ### Smoother play: the GPU thread no longer stops for the game's GPU counters

@@ -72,7 +72,7 @@ int g_opt_audio_eos_sample_count=1;   /* always on (cinematic clock ~2x and cut 
 char g_opt_pad_map[128]="";   /* physical-position button remapping, empty = identity */
 int g_opt_ctrl_api=0, g_opt_ctrl_index=0, g_opt_deadzone=7000;   /* [Input]: api 0 auto, 1 SDL2, 2 XInput */
 char g_opt_button_icons[16]="auto";   /* [Input] button_icons: auto, switch, xbox, ps4, ps5 (svc_fs.c romfs_apply_mods) */
-int g_opt_mouse_mode=0;   /* mouse_mode: 0 stick (right stick, dual stick scheme), 1 pointer (motion sensor, the game's Pointer scheme) */
+int g_opt_mouse_mode=2;   /* mouse_mode: 0 stick (right stick, dual stick scheme), 1 pointer (motion sensor, the game's Pointer scheme), 2 raw (svc_hid.c raw_apply) */
 int g_opt_mouse_aim=1, g_opt_mouse_sens=100;   /* [Input] mouse free aim (backend_win32.c mouse_apply) */
 int g_opt_diag=0;
 /* vsync: on by default off Windows. Without it the 60.00 FPS limiter beats against the display (59.95 Hz here): about once a
@@ -505,7 +505,7 @@ static const IniOpt INI_FG[]={
 static const IniOpt INI_INPUT[]={
   {"controller_map","","16 comma-separated button destinations (0..15, -1 disabled); empty = default. Keyboard and sticks unchanged."},
   {"mouse_aim","1","1 = mouse look: the mouse turns the camera (right stick) and its buttons press what the bind_ lines below give\n;   them (left ZR, right ZL, middle R by default). The cursor hides and stays in the window while the game has focus"},
-  {"mouse_mode","stick","stick = the mouse is the right stick (the game's Dual Stick scheme). pointer = the mouse is the controller's\n;   motion (choose the game's Pointer scheme in its Options, Controls)"},
+  {"mouse_mode","raw","raw = the mouse turns the camera itself, 1:1 (no stick speed limit or acceleration; lock-on and vehicles use the stick).\n;   stick = the mouse is the right stick (the game's Dual Stick scheme). pointer = the mouse is the controller's motion\n;   (choose the game's Pointer scheme in its Options, Controls)"},
   {"mouse_sensitivity","100","mouse look speed, in percent (10-1000)"},
   {"button_icons","auto","the game's button pictures: auto = from the controller connected at start (Xbox and Steam Deck:\n;   Xbox icons, DualShock 4: PS4, DualSense: PS5, Switch or none: the originals), or switch, xbox, ps4, ps5.\n;   Not in use yet: the icon packs it once loaded were for Metroid Dread and changed nothing in this game"},
   {"controller_api","auto","auto = SDL2 when SDL2.dll is next to the game (Bluetooth/USB Switch Pro, DualShock 4,\n;   DualSense, 8BitDo, Xbox...), else XInput. sdl or xinput to force one"},
@@ -592,8 +592,11 @@ void ini_set(const char* k, const char* v){ ini_store(k,v); g_ini_dirty=1; }
 
 /* settings_rev 1, once for an existing .ini (2026-11-09): the old defaults were written into every .ini, so they can't be told
    from a choice. Handheld mode looked pixelated on a PC, and waiting for shaders turned the background shader loader off */
-static void ini_migrate(void){ if(ini_get("settings_rev",NULL)) return;
-  ini_store("settings_rev","1"); ini_store("docked","1"); ini_apply("docked","1"); ini_store("wait_for_shaders","0"); ini_apply("wait_for_shaders","0"); }
+static void ini_migrate(void){
+  if(!ini_get("settings_rev",NULL)){ ini_store("settings_rev","1"); ini_store("docked","1"); ini_apply("docked","1"); ini_store("wait_for_shaders","0"); ini_apply("wait_for_shaders","0"); }
+  /* settings_rev 2 (2026-11-22): raw mouse aim arrived; stick was the only mouse look before it, so it moves to raw once.
+     A choice made after this stays */
+  if(atoi(ini_get("settings_rev","1"))<2){ ini_store("settings_rev","2"); const char* m=ini_get("mouse_mode","stick"); if(!strcmp(m,"stick")){ ini_store("mouse_mode","raw"); ini_apply("mouse_mode","raw"); } } }
 void ini_open(const char* path){ strncpy(g_ini_path,path,sizeof g_ini_path-1); ini_load(path); ini_migrate();
   /* a first start (no .ini yet) has no renderer= line: the renderer's checks (backend_win32.c, the Radeon RX switch
      away from AMD's crashing OpenGL driver) must see the default too, or the very first start crashed on those cards */

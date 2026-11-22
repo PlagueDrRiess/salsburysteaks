@@ -42,19 +42,65 @@ static void npad_setup(u8* base, int idx, u32 style, u32 devtype){
 }
 
 u64 g_pad_buttons_now;   /* cheats.c: keypress codes */
+/* Raw mouse aim (mouse_mode=raw): the mouse turns the camera itself, not the right stick. The game's camera turn
+   (F_920C224, main+1206224; x19 = the camera) moves a turn velocity (+0x318, +0x31C) toward the stick through two tuning
+   curves, an acceleration and a top speed (180 degrees a second, the stick's value about squared), then writes the yaw
+   rate it applies (+0x35C, degrees a second, negative to the right) and the pitch (+0x358, degrees). Measured
+   2026-11-22 with screenshots: a written rate turns from the next step, linearly, with no top speed, and -180 is exactly
+   3 degrees a 1/60 s step. So the mouse's counts since the last step go straight there: yaw rate -= degrees / step time,
+   pitch -= degrees (mouse up looks up). That is the curve, the ramp and the top speed of stick aiming gone. The stick
+   still adds its own turn. The game code calls in through two hooks in beyond_patches.json: svc 0xFFEA at the camera
+   turn's start (s0 = the step time) and 0xFFE9 after its stores (kernel.c). Where the camera turn doesn't run (lock-on,
+   vehicles, menus), backend_win32.c gives the mouse to the stick as in stick mode */
+volatile long long g_raw_mx, g_raw_my; volatile unsigned long long g_raw_used_ns; volatile int g_raw_test;
+volatile float g_cam_dt_seen; void (*g_cam_dev_hook)(CPU*,u64);   /* developer tools (runtime/local) */
+static __thread float t_cam_dt;
+#define RAW_DEG_PER_COUNT 0.04f   /* at 100%: 9000 counts a full turn, about 29 cm at 800 DPI */
+#define RAW_PITCH_MIN (-52.1f)    /* the stick's own limits, measured: no further down or up with the mouse either */
+#define RAW_PITCH_MAX 71.5f
+void aim_cam_entry(CPU* c){ t_cam_dt=c->v[0].f[0]; g_cam_dt_seen=t_cam_dt; }
+static void raw_apply(u64 o){
+  extern int g_opt_mouse_aim, g_opt_mouse_sens, g_opt_mouse_mode;
+  if(!g_raw_test && (!g_opt_mouse_aim || g_opt_mouse_mode!=2)) return;
+  g_raw_used_ns=plat_ns();
+  long long mx=__atomic_exchange_n(&g_raw_mx,0,__ATOMIC_ACQ_REL), my=__atomic_exchange_n(&g_raw_my,0,__ATOMIC_ACQ_REL);
+  if(!mx && !my) return;
+  float k=RAW_DEG_PER_COUNT*(float)g_opt_mouse_sens/100.0f, dt=t_cam_dt; if(!(dt>1e-4f && dt<0.25f)) dt=1.0f/60.0f;
+  if(mx){ float* rate=(float*)GP(o+0x35C); *rate-= (float)mx*k/dt; }
+  /* the pitch: not while the camera drives it itself (+0x3AD set: it eases it toward -90), and clamped only in the
+     direction it moves, so a pitch the game put past the limits is never pulled back by the mouse */
+  if(my && !*(const u8*)GP(o+0x3AD)){ float* pitch=(float*)GP(o+0x358); float p0=*pitch, p=p0-(float)my*k;
+    if(p>RAW_PITCH_MAX && p>p0) p= p0>RAW_PITCH_MAX? p0 : RAW_PITCH_MAX;
+    if(p<RAW_PITCH_MIN && p<p0) p= p0<RAW_PITCH_MIN? p0 : RAW_PITCH_MIN;
+    *pitch=p; } }
+volatile unsigned long long g_cam_seen_ns;   /* the gameplay camera ran (backend_win32.c: clicks are A/B in menus when it doesn't) */
+void aim_cam_hook(CPU* c){ u64 o=c->x[19]; if(!o) return; g_cam_seen_ns=plat_ns(); if(g_cam_dev_hook) g_cam_dev_hook(c,o); raw_apply(o); }
+/* Raw mouse free aim (lock-on): while ZL is held the game moves its aiming reticle, a screen offset (+0x388 x, +0x38C y,
+   about -1..1, kept while locked, reset on release) in the aim update F_920EC5C (main+1208C5C; x19 = its object), and
+   the camera holds still. backend_win32.c collects the mouse's counts for it then (g_ret_mx/my); here they move the
+   offset by the same angle a count turns the camera: a degree is 1/tan(half field of view) of the half screen, at the
+   game's 55-degree vertical view. The game's own code clamps and resets it. svc 0xFFE3 (beyond_patches.json) calls in
+   right after the aim update stores its turn speed, before it moves the offset */
+volatile long long g_ret_mx, g_ret_my; volatile unsigned long long g_ret_seen_ns; void (*g_look_dev_hook)(CPU*,u64);
+void aim_look_hook(CPU* c){ u64 o=c->x[19]; if(!o) return; g_ret_seen_ns=plat_ns(); if(g_look_dev_hook) g_look_dev_hook(c,o);
+  extern int g_opt_mouse_aim, g_opt_mouse_sens, g_opt_mouse_mode;
+  long long mx=__atomic_exchange_n(&g_ret_mx,0,__ATOMIC_ACQ_REL), my=__atomic_exchange_n(&g_ret_my,0,__ATOMIC_ACQ_REL);
+  if(!g_opt_mouse_aim || g_opt_mouse_mode!=2 || (!mx && !my)) return;
+  const float ty=0.5206f /* tan 27.5 degrees */, tx=ty*16.0f/9.0f, rad=(float)(RAW_DEG_PER_COUNT*3.14159265/180.0)*(float)g_opt_mouse_sens/100.0f;
+  float* px=(float*)GP(o+0x388); float* py=(float*)GP(o+0x38C);
+  float x=*px+(float)mx*rad/tx, y=*py-(float)my*rad/ty;   /* mouse up (dy < 0): the reticle up */
+  if(x>1.0f) x=1.0f; if(x<-1.0f) x=-1.0f; if(y>1.0f) y=1.0f; if(y<-1.0f) y=-1.0f;
+  *px=x; *py=y; }
+
 #ifdef SWR_DEVTOOLS
 #include "local/aim_dev.inc"   /* developer tools: the aim scan and the camera hooks' tests (not in the repository) */
 #else
-/* public builds: the game code has no hooks for svc 0xFFE1-0xFFEA (kernel.c), and the raw mouse counters
-   (backend_win32.c) are never used, so mouse_mode=raw falls back to the stick */
-volatile long long g_raw_mx, g_raw_my; volatile unsigned long long g_raw_used_ns; char g_test_shot[64];
+/* public builds: the developer hooks svc 0xFFE1-0xFFE8 (kernel.c) are not in the game code */
+char g_test_shot[64];
 void aim_axis_hook(CPU* c, int at_exit){ (void)c; (void)at_exit; }
-void aim_look_hook(CPU* c){ (void)c; }
 void aim_ctl_hook(CPU* c){ (void)c; }
 void aim_val_hook(CPU* c, int at_exit){ (void)c; (void)at_exit; }
 void aim_src_hook(CPU* c, int at_exit){ (void)c; (void)at_exit; }
-void aim_cam_entry(CPU* c){ (void)c; }
-void aim_cam_hook(CPU* c){ (void)c; }
 static void aim_scan_tick(void){}
 #endif
 

@@ -735,9 +735,10 @@ static std::vector<Opt> build_options() {
     // Controls
     B("mouse_aim", "Input", "Controls", "Mouse look", LIVE_YES, "1",
       "The mouse turns the camera. Left click shoots, right click locks on, middle click fires the subweapon.");
-    C("mouse_mode", "Input", "Controls", "Mouse drives", LIVE_YES, "stick", {{"stick", "Right stick (Dual Stick scheme)"}, {"pointer", "Motion (Pointer scheme)"}},
-      "Right stick: the camera turns no faster than the game's own stick speed, so raise the camera speed in the game's Options too. "
-      "Motion: aims like a pointer, with no such limit; choose the Pointer control scheme in the game's Options, Controls as well.");
+    C("mouse_mode", "Input", "Controls", "Mouse drives", LIVE_YES, "raw", {{"raw", "Camera, 1:1 (raw mouse)"}, {"stick", "Right stick (Dual Stick scheme)"}, {"pointer", "Motion (Pointer scheme)"}},
+      "Camera: the mouse turns the view itself, 1:1 and with no top speed or acceleration; where the game takes the camera (lock-on, vehicles) it drives the stick instead. "
+      "Right stick: the camera turns no faster than the game's own stick speed, with its acceleration. "
+      "Motion: aims like a pointer; choose the Pointer control scheme in the game's Options, Controls as well.");
     I("mouse_sensitivity", "Input", "Controls", "Mouse look speed", LIVE_YES, "100", 25, 1000, 5, "Percent: higher turns the camera further for the same mouse movement.");
     C("button_icons", "Input", "Controls", "Button icons", LIVE_RESTART, "auto",
       {{"auto", "Automatic"}, {"switch", "Switch (original)"}, {"xbox", "Xbox"}, {"ps4", "PlayStation 4"}, {"ps5", "PlayStation 5"}},
