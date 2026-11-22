@@ -4,6 +4,20 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.30
+
+### Smoother play: the GPU thread no longer stops for the game's GPU counters
+The game counts things on the GPU (the scan visor's progress, and many effects in the intro and in fights) and reads
+the counts back. Each read stopped the rendering thread until the GPU had finished everything queued, 20-110 ms at a
+time, several times a second and before draws. The counts now come back in the background. Only the "done" signals the
+game waits for are held until they arrive, as on the Switch, so scans still finish. In a recorded play session the
+share of frames over 20 ms went from 20% to under 9%. `SWR_GW_SYNC_OLD=1` brings the old way back for comparison.
+
+### No hitch when an area unloads its textures
+Deleting a texture the GPU might still be drawing with made the driver wait for the GPU: 30-190 ms each, and an area
+unload frees hundreds. Freed textures are now deleted 3 frames later, a few per frame. They also free two views that
+were never freed before (driver memory that grew with every area). `SWR_TEX_DELETE_NOW=1`: the old way.
+
 ## 2026.11.29
 
 ### Shaders are prepared before you play (NVIDIA, OpenGL and Vulkan output)

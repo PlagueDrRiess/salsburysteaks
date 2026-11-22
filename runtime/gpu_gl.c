@@ -2575,8 +2575,10 @@ static void gw_diff(const char* who, GwBuf* g, const u8* now, u32 n){
   static int lines; if(!g->last || lines>=600 || g->size<1024 || g->size>16384) return; u32 cnt=0; char buf[600]; int o=0;
   for(u32 k=0;k+4<=n && k<g->size;k+=4){ u32 v; memcpy(&v,now+k,4); if(v!=g->last[k/4]){ if(cnt<10 && o<520) o+=snprintf(buf+o,sizeof buf-o," [%u] %u->%u",k/4,g->last[k/4],v); cnt++; } }
   if(cnt){ lines++; LOG("gpu: %llx %s changed %u words:%s\n",(unsigned long long)g->addr,who,cnt,buf); } }
+static int gw_inflight(u64 a); static void gw_complete(int wait);
 static GwBuf* gw_get(u64 a, u32 n){
   static u8* tmp; static size_t cap; if(cap<n){ tmp=realloc(tmp,n); cap=n; } if(!tmp) return NULL;
+  if(gw_inflight(a)) gw_complete(1);   /* its counters land first, so the CPU check below compares with them, as the synchronous read did */
   gmem_read(a,tmp,n); u64 h=fast_hash(tmp,n,3);
   GwBuf* g=NULL; for(int i=0;i<g_ngw;i++) if(g_gw[i].addr==a){ g=&g_gw[i]; break; }
   if(!g){ gw_make_room(a,n); g=&g_gw[g_ngw++]; memset(g,0,sizeof *g); g->addr=a; glGenBuffers(1,&g->id);
@@ -2612,7 +2614,72 @@ static void gw_sync(void){
     int said= si_<0? 99 : (int)(seen_n[si_]<4? 0 : (seen_n[si_]%120==0? 0 : 99)); if(si_>=0) seen_n[si_]++;   /* each buffer: its first 4, then every 120th */
     if(said<6){ u32 nz=0, mx=0; for(u32 k=0;k+4<=g->size;k+=4){ u32 v; memcpy(&v,dst+k,4); if(v){ nz++; if(v>mx) mx=v; } }
       LOG("gpu: atomic counters at %llx (%u bytes) back in memory: %u nonzero, largest %u\n",(unsigned long long)g->addr,g->size,nz,mx); } } }
-void gpu_gl_gw_sync(void){ if(g_gl && g_gw_sync) gw_sync(); }   /* gpu.c / gpu_engines.c: before semaphore releases */
+/* The same counters without stopping the GPU thread (2026-11-22). The synchronous read above waits for the GPU to finish
+   everything queued so far, 20-110 ms each, and the intro and fights read counters many times a second (21 F5 traces
+   of the intro: the commonest named stall). On the Switch only the game's CPU waits for them, when it waits for the
+   release that follows. So now: the counter buffers are copied on the GPU into a mapped buffer behind a fence (a ring
+   of 8, so several can be in flight), and the releases that follow (semaphore and query writes, syncpoint increments)
+   are held in order until the copy lands. The changed words go back exactly as above. Before the GPU thread waits on
+   a semaphore or syncpoint, everything held lands first. SWR_GW_SYNC_OLD=1: the synchronous read */
+#define GWQ 8
+typedef struct { GLuint b; u8* p; u32 cap; GLsync f; int n; struct { u64 addr; u32 off, size; } e[16]; } GwSlot;
+static GwSlot g_gwq[GWQ]; static int g_gwq_head, g_gwq_n;   /* in flight: g_gwq_n slots from g_gwq_head */
+typedef struct { u8 kind; u32 id, n; u64 addr; u8 data[16]; } HeldEv;   /* kind 0: syncpoint incr (id, n times), 1: write n bytes */
+static HeldEv g_held[512]; static int g_nheld; static u64 st_gw_async, st_gw_held;
+static int gw_async_on(void){ static int on=-1; if(on<0){ on= !getenv("SWR_GW_SYNC_OLD") && rb_procs() && p_rbbs && p_rbmap && p_rbfs && p_rbcws && p_rbds; if(on) LOG("gpu: shader counters the game reads come back without stopping the GPU thread\n"); } return on; }
+static void held_drain(void){   /* in order, once nothing they depend on is in flight */
+  if(!g_nheld || g_gwq_n || cs_inflight()) return;
+  extern void syncpt_incr(u32 id);
+  for(int i=0;i<g_nheld;i++){ HeldEv* h=&g_held[i]; if(h->kind==0){ for(u32 k=0;k<h->n;k++) syncpt_incr(h->id); } else gmem_write(h->addr,h->data,h->n); }
+  g_nheld=0; }
+static void gw_land(GwSlot* s){   /* the copy is done: the words the GPU changed go to guest memory */
+  for(int j=0;j<s->n;j++){ GwBuf* g=NULL; for(int i=0;i<g_ngw;i++) if(g_gw[i].addr==s->e[j].addr){ g=&g_gw[i]; break; }
+    if(!g || !g->last) continue; u32 sz= s->e[j].size<g->size? s->e[j].size : g->size; u8* dst=gmem_ptr(g->addr,sz); if(!dst) continue;
+    const u32* gb=(const u32*)(s->p+s->e[j].off); gw_diff("GPU",g,(const u8*)gb,sz);
+    for(u32 k=0;k<sz/4;k++) if(gb[k]!=g->last[k]){ memcpy(dst+k*4,&gb[k],4); g->last[k]=gb[k]; }
+    g->hash=fast_hash((const u8*)g->last,g->size,3); gpu_mem_written(g->addr,sz); g->written=0; }
+  p_rbds(s->f); s->f=0; s->n=0; }
+static void gw_complete(int wait){   /* the slots whose copies are done, oldest first; wait=1: all of them */
+  while(g_gwq_n){ GwSlot* s=&g_gwq[g_gwq_head]; GLenum r=p_rbcws(s->f,GL_SYNC_FLUSH_COMMANDS_BIT,wait? 4000000000ull : 0);
+    if(r!=GL_ALREADY_SIGNALED && r!=GL_CONDITION_SATISFIED){ if(!wait) break; static int said; if(said<4){ said++; LOG("gpu: shader counter copy not done after 4 s: dropped\n"); } }
+    else gw_land(s);
+    if(s->f){ p_rbds(s->f); s->f=0; s->n=0; } g_gwq_head=(g_gwq_head+1)%GWQ; g_gwq_n--; }
+  held_drain(); }
+static void gw_sync_async(void){
+  if(!g_gw_sync) return; g_gw_sync=0;
+  static int off=-1; if(off<0) off=getenv("SWR_NO_GW_SYNC")!=NULL;
+  u32 need=0; for(int i=0;i<g_ngw;i++) if(g_gw[i].atomic_now) need+=(g_gw[i].size+255)&~255u;
+  if(!need || off){ for(int i=0;i<g_ngw;i++) g_gw[i].atomic_now=0; return; }
+  if(g_gwq_n>=GWQ) gw_complete(1);   /* all slots busy: the oldest has to land */
+  GwSlot* s=&g_gwq[(g_gwq_head+g_gwq_n)%GWQ];
+  if(s->cap<need){ if(s->b) glDeleteBuffers(1,&s->b); u32 cap=65536; while(cap<need) cap*=2; glGenBuffers(1,&s->b); glBindBuffer(GL_COPY_WRITE_BUFFER,s->b);
+    p_rbbs(GL_COPY_WRITE_BUFFER,cap,NULL,GL_MAP_READ_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT);
+    s->p=(u8*)p_rbmap(GL_COPY_WRITE_BUFFER,0,cap,GL_MAP_READ_BIT|GL_MAP_PERSISTENT_BIT|GL_MAP_COHERENT_BIT); s->cap= s->p? cap : 0;
+    if(!s->p){ static int said; if(!said){ said=1; LOG("gpu: shader counters: no mapped copy buffer (%u bytes): read the slow way\n",cap); } g_gw_sync=1; gw_sync(); return; } }   /* no mapping: the synchronous read */
+  glMemoryBarrier(0x2000|0x200);   /* storage | buffer update */
+  u32 off_=0; s->n=0; glBindBuffer(GL_COPY_WRITE_BUFFER,s->b);
+  for(int i=0;i<g_ngw && s->n<16;i++){ GwBuf* g=&g_gw[i]; if(!g->atomic_now) continue; g->atomic_now=0; if(!g->last) continue;
+    glBindBuffer(GL_COPY_READ_BUFFER,g->id); glCopyBufferSubData(GL_COPY_READ_BUFFER,GL_COPY_WRITE_BUFFER,0,off_,g->size);
+    s->e[s->n].addr=g->addr; s->e[s->n].off=off_; s->e[s->n].size=g->size; s->n++; off_+=(g->size+255)&~255u; }
+  for(int i=0;i<g_ngw;i++) g_gw[i].atomic_now=0;   /* more than 16 at once: the rest next time */
+  if(!s->n) return;
+  s->f=p_rbfs(GL_SYNC_GPU_COMMANDS_COMPLETE,0); glFlush(); g_gwq_n++; st_gw_async++;
+  if(st_gw_async==1 || !(st_gw_async%500)) LOG("gpu: %llu shader counter copies made in the background so far, %llu releases held behind them\n",(unsigned long long)st_gw_async,(unsigned long long)st_gw_held); }
+static int held_active(void){ return g_gwq_n || g_nheld; }
+static int gw_inflight(u64 a){ for(int k=0;k<g_gwq_n;k++){ GwSlot* s=&g_gwq[(g_gwq_head+k)%GWQ]; for(int j=0;j<s->n;j++) if(s->e[j].addr==a) return 1; } return 0; }
+static void held_push(int kind, u32 id, u32 n, u64 addr, const void* data){
+  if(g_nheld>=512) gw_complete(1);
+  if(g_nheld>=512){ held_drain(); }   /* a compute copy still in flight: it has to land too */
+  if(g_nheld>=512){ extern void cs_flush_pending(void); cs_flush_pending(); held_drain(); }
+  HeldEv* h=&g_held[g_nheld++]; h->kind=(u8)kind; h->id=id; h->n=n; h->addr=addr; if(kind && data) memcpy(h->data,data,n>16? 16 : n); st_gw_held++; }
+void gpu_gl_gw_sync(void){ if(!g_gl || !g_gw_sync) return; int a= t_gpu_thread && gw_async_on();
+  { static int said; if(said<3){ said++; LOG("gpu: shader counters read back %s (GPU thread %d)\n",a? "in the background" : "the slow way",t_gpu_thread); } }
+  if(a) gw_sync_async(); else gw_sync(); }   /* gpu.c / gpu_engines.c: before semaphore releases */
+/* a semaphore or query release (gpu.c, gpu_engines.c): written now, or held behind the counters in flight */
+void gpu_gl_release_write(u64 addr, const void* data, u32 n){
+  if(g_gl && t_gpu_thread && gw_async_on()){ if(g_gw_sync) gw_sync_async(); if(held_active() && n<=16){ held_push(1,0,n,addr,data); return; } }
+  else if(g_gl && g_gw_sync) gw_sync();
+  gmem_write(addr,data,n); }
 static void gw_writeback(void){
   { static int off=-1; if(off<0) off=getenv("SWR_NO_WRITEBACK")!=NULL; if(off) return; }
   if(!rb_procs()) return;
@@ -3679,7 +3746,7 @@ static void lighting_payload(Sh* fs){
   u32 n=g_cb.cbsize[4][3];if(n>sizeof p->values)n=sizeof p->values;p->size=n;if(p->addr&&n)gmem_read(p->addr,p->values,n);
 }
 void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count, u32 base_vertex, u32 base_instance, u32 instances){
-  gw_sync();   /* counters the previous draw updated */
+  gpu_gl_gw_sync();   /* counters the previous draw updated (in the background when it can: gw_sync_async) */
   u32* r=ch->r3d; g_draws++;
   if(g_lfn && !(g_draws&15)) lsfg_pump();   /* push pending generated frames out on time even mid-frame */
   if(!count) return;
@@ -4427,12 +4494,26 @@ static void present_cpu(u32* px, int w, int h){
    eats the iGPU's shared RAM. walks part of the table each frame; textures get recreated from memory if needed */
 static u64 st_tex_evict, st_vb_evict;
 
+/* Textures freed here are deleted later, a few at a time (2026-11-22). Deleting one the GPU may still be drawing with
+   made NVIDIA's driver wait for the GPU first: glDeleteTextures took 30-190 ms at once when an area unloaded (hitch
+   test), and an unload frees hundreds. Kept for 3 frames (the GPU is done with them by then), then at most 8 a frame;
+   GL doesn't reuse a name until it is deleted, so nothing can mistake one for a new texture. SWR_TEX_DELETE_NOW=1: at once */
+static GLuint g_tdel[8192]; static u32 g_tdel_f[8192]; static int g_tdel_n; static u64 st_tdel;
+static void tex_del_step(int all){
+  if(!g_tdel_n) return; int w=0, done=0, budget= all? 8192 : 8;
+  for(int i=0;i<g_tdel_n;i++){ if(done<budget && (all || g_frame-g_tdel_f[i]>=3)){ glDeleteTextures(1,&g_tdel[i]); done++; } else { g_tdel[w]=g_tdel[i]; g_tdel_f[w]=g_tdel_f[i]; w++; } }
+  g_tdel_n=w; st_tdel+=done; }
+static void tex_del_later(GLuint id){
+  if(!id) return; static int now=-1; if(now<0) now=getenv("SWR_TEX_DELETE_NOW")!=NULL;
+  if(now){ glDeleteTextures(1,&id); return; }
+  if(g_tdel_n>=8192) tex_del_step(1);   /* never more than that waiting */
+  g_tdel[g_tdel_n]=id; g_tdel_f[g_tdel_n]=g_frame; g_tdel_n++; }
 static void tex_free(Tex* t){
   aj_forget(t); free(t->slh);
-  glDeleteTextures(1,&t->id); if(t->view) glDeleteTextures(1,&t->view); if(t->pre) glDeleteTextures(1,&t->pre);
-  if(t->crop){ glDeleteTextures(1,&t->crop->id); if(t->crop->view) glDeleteTextures(1,&t->crop->view); free(t->crop); }
-  if(t->vol){ glDeleteTextures(1,&t->vol->id); if(t->vol->view) glDeleteTextures(1,&t->vol->view); free(t->vol); }
-  if(t->lay){ glDeleteTextures(1,&t->lay->id); if(t->lay->view) glDeleteTextures(1,&t->lay->view); free(t->lay); }
+  tex_del_later(t->id); tex_del_later(t->view); tex_del_later(t->pre); tex_del_later(t->sview); tex_del_later(t->iview);   /* the sampler and image views were never deleted */
+  if(t->crop){ tex_del_later(t->crop->id); tex_del_later(t->crop->view); free(t->crop); }
+  if(t->vol){ tex_del_later(t->vol->id); tex_del_later(t->vol->view); free(t->vol); }
+  if(t->lay){ tex_del_later(t->lay->id); tex_del_later(t->lay->view); free(t->lay); }
   free(t); }
 
 static void gpu_evict_step(void){
@@ -5482,15 +5563,16 @@ static void gpu_thread(void* arg){ plat_diag_role("GPU-submit"); t_gpu_thread=1;
     if(g_rec_toggle && g_rec_on){ g_rec_toggle=0; rec_stop(); }   /* let F7 stop even when nothing is being presented */
 #endif
     if(cs_inflight()){ cs_complete(0); if(cs_inflight() && to_>1000000) to_=1000000; }
+    if(held_active()){ gw_complete(0); if(held_active() && to_>1000000) to_=1000000; }   /* counters coming back and the releases behind them */
     Work w; u64 qw0=plat_ns(); int got=q_pop(&w,to_); g_idle_ns+=plat_ns()-qw0; if(!got){ lsfg_pump(); continue; }
     u64 t_busy0=plat_ns(),work_cpu=work_trace?plat_thread_cpu_ns():0;u32 work_frame=g_frame;
     switch(w.kind){
       case WK_SUBMIT: g_submit_epoch++; ww_poll(); { extern volatile u64 g_gpu_sub_ns; static u32 fr=~0u; if(fr!=g_frame || !g_gpu_sub_ns){ fr=g_frame; g_gpu_sub_ns=w.sub_ns; } }   /* stamp the whole frame with the time of its first submit */ { extern u64 guest_ns(void); u64 q0=guest_ns(), p0=plat_ns(); gpu_submit_now(w.ent,w.n,w.syncpt); u64 pd=plat_ns()-p0; static int said;
         if(said<60 && (q0-w.sub_ns>30000000ull || pd>30000000ull)){ said++; LOG("gpu: submit on syncpoint %u waited %.1f ms in the queue, took %.1f ms (%u entries)\n",w.syncpt,(q0-w.sub_ns)/1e6,pd/1e6,w.n); } }
         cs_kick_async(); free(w.ent); cs_submit_done(w.syncpt,w.incs); break;
-      case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; pc_step(); job_grave_step(); aj_drain(); gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
+      case WK_PRESENT_CPU: trace_note("PRESENT CPU image %dx%d\n",w.w,w.h); present_cpu(w.px,w.w,w.h); free(w.px); g_frame++; pc_step(); job_grave_step(); tex_del_step(0); aj_drain(); gpu_gl_gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_PRESENT_ADDR: if(!present_addr(w.addr,w.w,w.h)){ extern void vi_convert_cpu(u64 a, u32 w, u32 h, u32 pitch, u32 layout, u32 bhl, u32 fmt, u32* out);
-          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; pc_step(); job_grave_step(); dlg_frame(); aj_drain(); gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
+          u32* px=malloc((size_t)w.w*w.h*4); vi_convert_cpu(w.addr,w.w,w.h,w.n,(w.fmt>>8)&15,(w.fmt>>12)&15,w.fmt&0xFF,px); present_cpu(px,w.w,w.h); free(px); } g_frame++; pc_step(); job_grave_step(); tex_del_step(0); dlg_frame(); aj_drain(); gpu_gl_gw_sync(); gw_writeback(); oq_poll(); bp_trim(); gpu_evict_step(); frame_stats(); trace_frame(); break;
       case WK_SYNC: pm_lock(&g_ql);__atomic_store_n(w.done,1,__ATOMIC_RELEASE);pc_broadcast(&g_frame_consumed_cv);pm_unlock(&g_ql);break;
       case WK_DUMP: if(!getenv("SWR_TEST_NODUMP")) dump_rts(); g_tr_arm=1; break;   /* test only: the trace without the target pictures */
       case WK_SHOT: do_screenshot(w.path[0]? w.path : NULL); __atomic_store_n(&g_shot_done,w.n,__ATOMIC_SEQ_CST); break;
@@ -5593,11 +5675,13 @@ static void cs_complete(int wait){
   u8* tmp=cs_tmp(g_cs_fl.used); glBindBuffer(GL_COPY_READ_BUFFER,g_cs_fl.buf); glGetBufferSubData(GL_COPY_READ_BUFFER,0,g_cs_fl.used,tmp);
   cs_apply(tmp,g_cs_fl.p,g_cs_fl.n); g_cs_fl.n=0; g_cs_fl.used=0; g_cs_any= g_cs_npend>0; if(!g_cs_any){ g_cs_lo=~0ull; g_cs_hi=0; }
   /* submits that completed while this was in flight only count as done now; the game waits on them before reading */
-  extern void syncpt_incr(u32 id); for(int i=0;i<g_cs_nincs;i++) for(u32 k=0;k<g_cs_incs[i].n;k++) syncpt_incr(g_cs_incs[i].id); g_cs_nincs=0; }
+  extern void syncpt_incr(u32 id); for(int i=0;i<g_cs_nincs;i++) for(u32 k=0;k<g_cs_incs[i].n;k++) syncpt_incr(g_cs_incs[i].id); g_cs_nincs=0;
+  held_drain(); }   /* releases held behind this copy too */
 
 /* syncpoint incrs of a submit get held back (in order) while compute results are in flight */
 static void cs_submit_done(u32 id, u32 n){
   extern void syncpt_incr(u32 id);
+  if(held_active()){ held_push(0,id,n,0,NULL); return; }   /* behind shader counters still coming back (gw_sync_async) */
   if(g_cs_fl.fence && g_cs_nincs>=64){ cs_complete(1);
     /* still full after a timeout: release what is held rather than writing past g_cs_incs */
     if(g_cs_nincs>=64){ for(int i=0;i<g_cs_nincs;i++) for(u32 k=0;k<g_cs_incs[i].n;k++) syncpt_incr(g_cs_incs[i].id); g_cs_nincs=0; } }
@@ -5612,7 +5696,7 @@ void gpu_gl_stream_incr(u32 id){
   cs_submit_done(id,1); }
 
 /* the stream is about to wait on a syncpoint: flush everything in flight */
-void gpu_gl_before_syncwait(void){ if(t_gpu_thread && g_cs_fl.fence) cs_complete(1); }
+void gpu_gl_before_syncwait(void){ if(!t_gpu_thread) return; if(g_cs_fl.fence) cs_complete(1); if(held_active()) gw_complete(1); held_drain(); }   /* also before a semaphore acquire (gpu.c, gpu_engines.c) */
 
 static int cs_inflight(void){ return g_cs_fl.fence!=0; }
 

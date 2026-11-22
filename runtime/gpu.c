@@ -88,10 +88,12 @@ static void puller_method(GpuChannel* ch, u32 m, u32 v){
     case 0x07: { /* SemaphoreOperation */
       u64 addr=((u64)(r[4]&0xFF)<<32)|r[5]; u32 op=v&0x1F;
       if(op==2){ /* release */
-        { extern void gpu_gl_gw_sync(void); gpu_gl_gw_sync(); }
-        if(v&(1u<<24)) { gmem_w32(addr,r[6]); }                     /* 4 bytes only */
-        else { extern u64 gpu_ticks(void); u32 q[4]={r[6],0,0,0}; u64 t=gpu_ticks(); memcpy(&q[2],&t,8); gmem_write(addr,q,16); }
+        /* written now, or held behind shader counters still coming back from the GPU (gpu_gl.c gpu_gl_release_write) */
+        extern void gpu_gl_release_write(u64,const void*,u32);
+        if(v&(1u<<24)) { u32 w=r[6]; gpu_gl_release_write(addr,&w,4); }                     /* 4 bytes only */
+        else { extern u64 gpu_ticks(void); u32 q[4]={r[6],0,0,0}; u64 t=gpu_ticks(); memcpy(&q[2],&t,8); gpu_gl_release_write(addr,q,16); }
       } else if(op==1 || op==4){ /* acquire, with a timeout so a bad value can't hang us */
+        { extern void gpu_gl_before_syncwait(void); gpu_gl_before_syncwait(); }   /* held releases land first: one could be this one */
         u64 t0=plat_ns(), end=t0+2000000000ull;
         for(;;){ u32 cur=gmem_r32(addr); if(op==1? cur==r[6] : (i32)(cur-r[6])>=0) break; if(plat_ns()>end){ WARN("gpu: semaphore %llx waits for %x (has %x)\n",(unsigned long long)addr,r[6],cur); break; } plat_yield(); }
         { u64 dt=plat_ns()-t0; static int said; if(dt>10000000ull && said<40){ said++; LOG("gpu: channel %p semaphore acquire %llx waited %.1f ms\n",(void*)ch,(unsigned long long)addr,dt/1e6); } }

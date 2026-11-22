@@ -115,10 +115,12 @@ static void query_get(GpuChannel* ch, u32* r, int base, u32 v){
   u64 addr=((u64)(r[base]&0xFF)<<32)|r[base+1]; u32 seq=r[base+2];
   u32 op=v&3;
   if(op==0){ /* release */
-    { extern void gpu_gl_gw_sync(void); gpu_gl_gw_sync(); }   /* counters the game reads once this is released */
-    if(((v>>4)&1) || ((v>>28)&1)) gmem_w32(addr,seq);
-    else { u64 q[2]={seq,gpu_ticks()}; gmem_write(addr,q,16); }
+    /* counters the game reads once this is released: written now, or held until they are back (gpu_gl.c) */
+    extern void gpu_gl_release_write(u64,const void*,u32);
+    if(((v>>4)&1) || ((v>>28)&1)){ u32 w=seq; gpu_gl_release_write(addr,&w,4); }
+    else { u64 q[2]={seq,gpu_ticks()}; gpu_gl_release_write(addr,q,16); }
   } else if(op==1){ /* acquire */
+    { extern void gpu_gl_before_syncwait(void); gpu_gl_before_syncwait(); }   /* held releases land first */
     u64 end=plat_ns()+1000000000ull;
     while(gmem_r32(addr)!=seq && plat_ns()<end) plat_yield();
   } else if(op==2){ /* counter */

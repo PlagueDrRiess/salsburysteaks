@@ -37,6 +37,8 @@ void gpu_gl_dispatch(void* ch, const void* q, unsigned long long code){ (void)ch
 volatile int g_cs_any; void cs_mem_need(u64 a, u64 n){ (void)a; (void)n; }
 
 void gpu_gl_before_syncwait(void){}
+void gpu_gl_gw_sync(void){}
+void gpu_gl_release_write(u64 addr, const void* data, u32 n){ extern void gmem_write(u64,const void*,u64); gmem_write(addr,data,n); }
 
 void gpu_gl_stream_incr(u32 id){ extern void syncpt_incr(u32); syncpt_incr(id); }
 
