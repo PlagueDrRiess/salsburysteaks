@@ -3,5 +3,6 @@
 
 volatile u64 g_dk_camera;
 int dk_devmode(void){ return 0; }
+int dk_private_build=0;
 void dk_tick(void){}
 void dk_page_draw(void){}

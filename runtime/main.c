@@ -25,9 +25,17 @@ int g_opt_show_fps=0;
 volatile int g_skip_prompt;            /* the native Vulkan renderer's top-left prompt overlay (snxvk hdr.c): nothing sets it */
 volatile float g_skip_hold;
 static void env_switch(const char* name, int on);
+/* the "Preparing shaders" hold (vi_show_buffer): its progress, 0..1, as a thin bar under the game's logo; -1 = none */
+volatile float g_prepare_frac=-1.0f;
+static int prepare_bar_rects(int W,int H,int (*r)[5],int max){
+  float f=g_prepare_frac; if(f<0 || max<2) return 0; if(f>1) f=1;
+  int bw=W*2/5, bh= H/180>3? H/180 : 3, x=(W-bw)/2, y=H-H/12;
+  r[0][0]=x; r[0][1]=y; r[0][2]=bw; r[0][3]=bh; r[0][4]=0;   /* the track */
+  int fw=(int)(bw*f); if(fw<1) return 1; r[1][0]=x; r[1][1]=y; r[1][2]=fw; r[1][3]=bh; r[1][4]=1; return 2; }
 int fps_overlay_rects(int W,int H,int (*r)[5],int max){
   static u64 t0;static u32 frames;static int fps=-1;
   extern volatile int g_fov_bisect; int bis=g_fov_bisect;   /* the F9 FOV test's step shows here as "tESt N" */
+  { int nb=prepare_bar_rects(W,H,r,max); if(nb) return nb; }
   if(!g_opt_show_fps && !bis){t0=0;frames=0;fps=-1;return 0;}
   u64 now=plat_ns();if(!t0)t0=now;else frames++;
   if(now-t0>=500000000ull){fps=(int)(((u64)frames*2000000000ull/(now-t0)+1)/2);t0=now;frames=0;}
@@ -319,7 +327,7 @@ static void ini_apply(const char* k, const char* v){
     if(!strcmp(k,"docked")) g_opt_docked=atoi(v);
     else if(!strcmp(k,"controller_map")){ snprintf(g_opt_pad_map,sizeof g_opt_pad_map,"%s",v); }
     else if(!strcmp(k,"mouse_aim")) g_opt_mouse_aim=atoi(v)!=0;
-    else if(!strcmp(k,"mouse_mode")) g_opt_mouse_mode= !strcmp(v,"pointer");
+    else if(!strcmp(k,"mouse_mode")) g_opt_mouse_mode= !strcmp(v,"pointer")? 1 : !strcmp(v,"raw")? 2 : 0;   /* 2: svc_hid.c raw_apply */
     else if(!strcmp(k,"mouse_sensitivity")){ g_opt_mouse_sens=atoi(v); if(g_opt_mouse_sens<10) g_opt_mouse_sens=10; if(g_opt_mouse_sens>1000) g_opt_mouse_sens=1000; }
     else if(!strcmp(k,"mouse_buttons")){   /* replaced by the bind_ lines: an older .ini's mouse buttons move there, and the line goes */
 #ifdef _WIN32
@@ -586,7 +594,11 @@ void ini_set(const char* k, const char* v){ ini_store(k,v); g_ini_dirty=1; }
    from a choice. Handheld mode looked pixelated on a PC, and waiting for shaders turned the background shader loader off */
 static void ini_migrate(void){ if(ini_get("settings_rev",NULL)) return;
   ini_store("settings_rev","1"); ini_store("docked","1"); ini_apply("docked","1"); ini_store("wait_for_shaders","0"); ini_apply("wait_for_shaders","0"); }
-void ini_open(const char* path){ strncpy(g_ini_path,path,sizeof g_ini_path-1); ini_load(path); ini_migrate(); ini_write(); }
+void ini_open(const char* path){ strncpy(g_ini_path,path,sizeof g_ini_path-1); ini_load(path); ini_migrate();
+  /* a first start (no .ini yet) has no renderer= line: the renderer's checks (backend_win32.c, the Radeon RX switch
+     away from AMD's crashing OpenGL driver) must see the default too, or the very first start crashed on those cards */
+  if(!ini_get("renderer",NULL)) ini_apply("renderer","opengl");
+  ini_write(); }
 
 /* ini edited while running: reload and apply what we can live */
 void ini_poll(void){
@@ -657,6 +669,34 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   { extern void splash_first_swap(void) __attribute__((weak)); static int said; if(!said){ said=1; if(splash_first_swap) splash_first_swap(); } }
 #endif
   pace_update();
+  { /* preparing shaders before play (gpu_gl.c gpu_gl_prepare_status): the game waits at its first image, with a progress
+       bar, until every shader the game files and the shader list name is built and the recorded draw states are warmed.
+       Later starts find them done and go straight on. Esc skips; SWR_NO_PREPARE=1: off */
+    static int prepared; extern int g_gl, g_snxvk_on;
+    if(!prepared && (g_gl || g_snxvk_on || g_frames>600)){ prepared=1;   /* once the renderer is up: the first images can come before it */
+      if(g_gl && !g_snxvk_on && !getenv("SWR_NO_PREPARE")){
+        extern volatile int g_prepare; extern int gpu_gl_prepare_status(char*,int,float*); extern void gpu_gl_present_cpu(const u32*,int,int,int);
+        extern int backend_prep_skip(void) __attribute__((weak));
+        /* the game's own first image (its logo) stays on screen, shown again while it waits; the progress is in the window
+           title, so nothing is drawn over the logo */
+        extern u64 nvmap_addr_by_id(u32 id); extern void gpu_gl_present_buffer(u64,u32,u32,u32,u32,u32,u32);
+        u64 la=nvmap_addr_by_id(nvmap_id); if(la) la+=offset;
+        char msg[200]; float f=0; u64 t0=plat_ns(); int shown=0, extra=-1;
+        /* while it waits, the spare CPU threads build shaders too (shader_helper.inc: extra helper processes) */
+        extern int backend_shader_helper_extra(void) __attribute__((weak)); extern void backend_shader_helper_extra_stop(void) __attribute__((weak));
+        g_prepare=1;
+        while(!gpu_gl_prepare_status(msg,sizeof msg,&f)){
+          if(extra<0 && backend_shader_helper_extra) extra=backend_shader_helper_extra();
+          { extern volatile float g_prepare_frac; g_prepare_frac=f; }   /* the bar under the logo (fps_overlay_rects) */
+          if(backend_prep_skip && backend_prep_skip()){ LOG("prepare: skipped with Esc at %.0f%%\n",f*100); break; }
+          if(plat_ns()-t0>1800000000000ull){ LOG("prepare: still not done after 30 minutes: going on\n"); break; }
+          if(!shown){ shown=1; LOG("prepare: holding the game at its first image until the shaders are ready\n"); }
+          if(la) gpu_gl_present_buffer(la,w,h,pitch,layout,bhl,fmt);
+          plat_sleep_ns(200000000); }
+        if(backend_shader_helper_extra_stop) backend_shader_helper_extra_stop();
+        { extern volatile float g_prepare_frac; g_prepare_frac=-1.0f; }
+        g_prepare=0;
+        if(shown) LOG("prepare: %s after %.0f s\n",msg,(plat_ns()-t0)/1e9); else LOG("prepare: nothing to wait for (%s)\n",msg); } } }
   static int trace_configured;static FILE*limiter_trace;static unsigned trace_rows;
   if(!trace_configured){trace_configured=1;const char*path=getenv("SWR_TRACE_LIMITER");if(path&&path[0]){limiter_trace=fopen(path,"w");if(limiter_trace)fprintf(limiter_trace,"frame,thread,enter_ns,enqueued_ns,limit_begin_ns,end_ns,requested_sleep_ms,actual_sleep_ms,deadline_ns\n");}}
   u64 trace_enter=limiter_trace?plat_ns():0,trace_enqueued=0,trace_begin=0,trace_sleep=0,trace_actual=0,trace_deadline=0;

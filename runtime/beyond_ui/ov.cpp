@@ -262,7 +262,13 @@ static int ovk_from_vk(unsigned long long w) {
     return 0;
 }
 extern "C" int ov_wndproc(void* h, unsigned m, unsigned long long w, long long l) {
-    (void)h;
+    /* Native Vulkan can't draw this menu yet, so it had no way to quit but Alt+F4 (issue 27): F1 asks there instead.
+       Only the key: a Home press would leave a controller-only player in a box the pad can't answer */
+    if (m == WM_KEYDOWN && w == VK_F1 && !(l & (1 << 30)) && g_snxvk_on) {
+        logf_(1, "menu: F1 on Native Vulkan: asking whether to quit\n");
+        if (MessageBoxW((HWND)h, L"The in-game menu isn't available with Native Vulkan yet (it is with OpenGL).\n\nQuit the game now? Unsaved progress since your last save is lost.",
+                        L"Metroid Prime 4 Beyond", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) { logf_(1, "menu: quit from the F1 question\n"); backend_request_quit(); }
+        return 1; }
     if (m == WM_KEYDOWN && w == VK_F1 && !(l & (1 << 30))) { ov_input_toggle(); return 1; }
     if (!g_q.open) return 0;
     if (g_q.capture) {   // a key binding waits: the next key or mouse button press goes to it, not to the menu

@@ -51,11 +51,14 @@ void backend_ini(const char* k, const char* v){
        Go and other APUs) run OpenGL and stay on it. SWR_AMD_OPENGL=1 keeps OpenGL */
     if(!getenv("SWR_RENDERER") && !getenv("SWR_AMD_OPENGL") && (!strcmp(v,"opengl") || !strcmp(v,"vulkan"))){
       DISPLAY_DEVICEA dd; memset(&dd,0,sizeof dd); dd.cb=sizeof dd; int rx=0;
-      for(DWORD i=0; EnumDisplayDevicesA(NULL,i,&dd,0); i++){ if((dd.StateFlags&DISPLAY_DEVICE_PRIMARY_DEVICE) && (strstr(dd.DeviceString,"Radeon RX") || strstr(dd.DeviceString,"Radeon(TM) RX"))) rx=1; memset(&dd,0,sizeof dd); dd.cb=sizeof dd; }
+      for(DWORD i=0; EnumDisplayDevicesA(NULL,i,&dd,0); i++){ if((dd.StateFlags&DISPLAY_DEVICE_PRIMARY_DEVICE) && (strstr(dd.DeviceString,"Radeon RX") || strstr(dd.DeviceString,"Radeon(TM) RX") || strstr(dd.DeviceString,"Radeon PRO") || strstr(dd.DeviceString,"Radeon Pro"))) rx=1;   /* Radeon PRO: the same driver */ memset(&dd,0,sizeof dd); dd.cb=sizeof dd; }
+      if(getenv("SWR_TEST_RADEON_RX")) rx=1;   /* automated test of this switch on a PC without one */
       if(rx){ LOG("renderer: %s on a Radeon RX card: AMD's OpenGL driver crashes there, so native Vulkan is used (SWR_AMD_OPENGL=1 keeps OpenGL)\n",v); v="vulkan_native"; } }
     g_want_vk= !strcmp(v,"vulkan"); extern void snxvk_ini(const char*); snxvk_ini(v); }   /* vulkan_native: snxvk_glue.c */
 }
 
+/* Esc while the game waits for its shaders at boot (main.c vi_show_buffer): only with the game's window in front */
+int backend_prep_skip(void){ return g_hwnd && GetForegroundWindow()==g_hwnd && (GetAsyncKeyState(VK_ESCAPE)&0x8000); }
 /* a status after the window title (shader pre-build progress); NULL restores the title */
 static void backend_status_win(const char* s){ if(!g_hwnd) return; char* c=NULL; if(s){ size_t n=strlen(s)+1; c=malloc(n); if(!c) return; memcpy(c,s,n); }
   if(!PostMessageA(g_hwnd,WM_APP+10,0,(LPARAM)c)) free(c); }
@@ -734,6 +737,13 @@ static void mouse_apply(i32* rx, i32* ry){
   mouse_test(&dx,&dy);
   if(!g_opt_mouse_aim){ vx=vy=0; last=0; return; }
   u64 now=plat_ns(); float dt= last? (float)((now-last)/1e9) : 0.016f; last=now; if(dt<0.001f) dt=0.001f; if(dt>0.1f) dt=0.1f;
+  /* mouse_mode=raw: while the camera's own turn runs (svc_hid.c raw_apply, used in the last 100 ms) the counts go to it,
+     1:1, and the stick is left alone. Where it doesn't run, the mouse drives the stick as in stick mode */
+  { extern int g_opt_mouse_mode; extern volatile long long g_raw_mx, g_raw_my; extern volatile unsigned long long g_raw_used_ns;
+    if(g_opt_mouse_mode==2 && g_raw_used_ns && now-g_raw_used_ns<100000000ull){
+      if(dx||dy){ __atomic_fetch_add(&g_raw_mx,(long long)dx,__ATOMIC_RELAXED); __atomic_fetch_add(&g_raw_my,(long long)dy,__ATOMIC_RELAXED); }
+      static int said; if(!said){ said=1; LOG("input: raw mouse aim in use (the mouse turns the camera itself)\n"); }
+      vx=vy=0; return; } }
   { /* mouse_mode=pointer: the mouse turns the emulated controller instead, for the game's Pointer control scheme (aim with
        motion): 40000 counts for a full turn at 100% (8000 crossed the screen in a twentieth of an inch at 16000 DPI, since
        pointer aiming spans only about 40 degrees, 2026-11-14) */
@@ -772,7 +782,15 @@ static void mouse_capture(int want){ static int on; static u64 last; u64 now=pla
   if(want){ if(!on || now-last>250000000ull){ RECT c; GetClientRect(g_hwnd,&c); MapWindowPoints(g_hwnd,NULL,(POINT*)&c,2); ClipCursor(&c); on=1; last=now; } }
   else if(on){ ClipCursor(NULL); on=0; } }
 
+#ifdef SWR_DEVTOOLS
+#include "local/watch_dev.inc"   /* developer tool: hardware watchpoints (not in the repository) */
+#else
+void wp_arm(u64 guest){ (void)guest; }
+void wp_arm_rw(u64 guest){ (void)guest; }
+static void wp_tick(void){}
+#endif
 void video_poll(void){
+  wp_tick();
   u64 k=keys_bits()|keys_tapped|mouse_bits(), b=0;keys_tapped=0;
   { static int iso=-1; if(iso<0) iso=getenv("SWR_TEST_MOUSE")!=NULL; if(iso) k=mouse_bits(); }   /* test only: and no keyboard */
   i32 lx=axis(k,40,42), ly=axis(k,43,41), rx=axis(k,44,46), ry=axis(k,47,45);
@@ -868,6 +886,7 @@ void frontend_frame(void){
     const char*stop=getenv("SWR_TEST_EXIT_FRAME");if(stop&&(u64)g_frames>=strtoull(stop,NULL,10)){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}log_flush();fflush(NULL);ExitProcess(0);}
   }
 
+  { extern char g_test_shot[64]; if(g_test_shot[0]){ char p[MAX_PATH]; CreateDirectoryA("captures",NULL); snprintf(p,sizeof p,"captures/aimtest_%s",g_test_shot); g_test_shot[0]=0; gpu_gl_screenshot(p); } }   /* svc_hid.c's automated aim tests */
   if(g_shot_req){ g_shot_req=0; char p[MAX_PATH]; SYSTEMTIME t; GetLocalTime(&t); CreateDirectoryA("captures",NULL);
     snprintf(p,sizeof p,"captures/screenshot_%04d%02d%02d_%02d%02d%02d",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond); gpu_gl_screenshot(p); }
   if(g_seconds && plat_ns()-g_start>=(u64)g_seconds*1000000000ull){

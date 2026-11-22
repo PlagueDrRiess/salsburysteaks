@@ -158,7 +158,10 @@ static int astc_gpu_on(void){
    buffer: the caller's glTexSubImage with a NULL pointer fills the texture from it */
 static void astc_gpu_decode(const u8* lin, u32 lw, u32 lh, u32 ns, u32 bw, u32 bh){
   u32 bx=(lw+bw-1)/bw, by=(lh+bh-1)/bh; u64 nb=(u64)bx*by*ns; GLsizeiptr inb=(GLsizeiptr)(nb*16), outb=(GLsizeiptr)((u64)lw*lh*ns*4);
-  GLint prev=0; glGetIntegerv(0x8B8D /* GL_CURRENT_PROGRAM */,&prev);
+  /* the program to put back comes from gpu_gl.c's shadow: asking GL for it (GL_CURRENT_PROGRAM) waited for the GL thread
+     to finish everything queued, 13-16 ms a texture even for a 4x4 one, the commonest hitch of play with a full shader
+     cache (hitch test 2026-11-22) */
+  GLint prev=(GLint)g_prog_shadow;
   glBindBuffer(GL_SHADER_STORAGE_BUFFER,g_astc_buf[0]); glBufferData(GL_SHADER_STORAGE_BUFFER,inb,lin,GL_STREAM_DRAW);   /* orphaned each time: no wait on the last decode */
   glBindBuffer(GL_SHADER_STORAGE_BUFFER,g_astc_buf[1]); glBufferData(GL_SHADER_STORAGE_BUFFER,outb,NULL,GL_STREAM_COPY);
   glBindBuffer(GL_SHADER_STORAGE_BUFFER,0);

@@ -341,6 +341,7 @@ def build_runtime(cc, out, target_win, backend, say, opt='2'):
     if vp9: cmd += ['-DSWR_HAVE_VP9']
     if backend in ('win32', 'x11'): cmd += ['-DSWR_HAVE_KEYBIND']
     if release: cmd += ['-DSWR_RELEASE']
+    if dk_local: cmd += ['-DSWR_DEVTOOLS']   # runtime/local/*.inc: the developer tools svc_hid.c and backend_win32.c include
     if with_dlss: cmd += ['-DSWR_HAVE_DLSS']
     if release and with_dlss: cmd += ['-DSWR_PERSONAL_DLSS']   # no in-place updates: they would bring back the public EXE
     if os.environ.get('SWR_RUNTIME_DEFS'): cmd += os.environ['SWR_RUNTIME_DEFS'].split()   # e.g. -DSWR_NO_SKIPCUT for a test build

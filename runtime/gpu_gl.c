@@ -22,6 +22,13 @@ int gl_frontend_available;
 static int g_gl_ready;
 #include "glq.h"
 
+/* the program this file last bound: code that borrows the program slot (astc_gl.inc's decoder) puts it back from here.
+   Asking GL instead (GL_CURRENT_PROGRAM) waits for the GL thread to finish everything queued */
+static GLuint g_prog_shadow;
+static void gl_use_program_shadowed(GLuint p){ g_prog_shadow=p; p_glUseProgram(p); }
+#undef glUseProgram
+#define glUseProgram gl_use_program_shadowed
+
 /* GL calls in this file go through glq when it's on */
 #define backend_gl_proc glq_proc
 #define backend_gl_swap glq_swap
@@ -1739,7 +1746,6 @@ static void ld_drain(void){ if(g_ld_state==0) return;
    one program per shader stage, compiled once; draws just bind the stages instead of linking every
    vs+fs combination */
 static int g_sep=-1; static GLuint g_pipe; static int g_pipe_on; static GLuint g_pipe_vs, g_pipe_fs, g_pipe_gs;
-
 #define ULOC_LAZY (-2)   /* swr_vp / swr_at found by the GL thread at the first set (glq_prog_uniform_named) */
 static void prog_u4(GLuint p, GLint loc, int which, const float* v){ if(loc==ULOC_LAZY) glq_prog_uniform_named(p,which,v); else glProgramUniform4fv(p,loc,1,v); }
 static void sh_uloc(Sh* s){u64 start=plat_ns(); s->uloc= s->sp? ULOC_LAZY : -1;shader_uniform_ns+=plat_ns()-start; }
@@ -4945,6 +4951,8 @@ static void seed_thread(void* arg){ (void)arg; plat_diag_role("shader-seed"); pl
 typedef struct { u64 tk; int stage; u32 idx, ndep; ShaderInfo si; char* src; TransDep dep[TDEP_MAX]; int ans; } SeedTr;   /* src NULL: seed entries before idx are done; ans: made from a shader answer */
 #define SQN 256
 static SeedTr g_sq[SQN]; static volatile u32 g_sq_w, g_sq_r, g_seed_drained; static u32 g_seed_tr_n, g_seed_tr_skip;
+static volatile int g_seed_tr_done;   /* the seed's translator thread is finished, shader list included */
+volatile int g_prepare;   /* 1 while the game waits at boot for the shaders to be prepared (main.c vi_show_buffer) */
 static u8* g_seed_ok;   /* per seed program: 1 translated ahead (the others read the game's data: left for when it loads them) */
 #define SEED_TR_PATH "shader_cache/seed_tr_v" TR_STR(TR_VER) ".bin"   /* which seed programs this translator version did */
 static __thread int t_seed_overflow; static __thread u32 t_seed_ndep; static __thread TransDep t_seed_dep[TDEP_MAX];
@@ -4997,7 +5005,7 @@ static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-transla
     FILE* d=fopen(SEED_TR_PATH,"rb"); char mg[8]; u64 sig=0; u32 n=0;
     if(d && fread(mg,1,8,d)==8 && !memcmp(mg,"SWRSTR03",8) && fread(&sig,8,1,d)==1 && sig==g_seed_sig && fread(&n,4,1,d)==1 && n==g_seed_n && fread(g_seed_ok,1,n,d)==n){
       fclose(d); u32 k=0; for(u32 i=0;i<n;i++) k+=g_seed_ok[i]; __atomic_store_n(&g_seed_drained,n,__ATOMIC_RELEASE);
-      LOG("shaders: seed translated before: %u of %u programs ready to build\n",k,n); seed_ans_pass(); return; }
+      LOG("shaders: seed translated before: %u of %u programs ready to build\n",k,n); seed_ans_pass(); __atomic_store_n(&g_seed_tr_done,1,__ATOMIC_RELEASE); return; }
     if(d) fclose(d); }
   FILE* f=fopen("shader_cache/seed.bin","rb"); if(!f) return; u8* code=malloc(0x10000+64); if(!code){ fclose(f); return; }
   u64 t0=plat_ns();
@@ -5023,7 +5031,7 @@ static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-transla
   /* written once the GL thread has filed every result (the translated cache is appended there) */
   while(__atomic_load_n(&g_seed_drained,__ATOMIC_ACQUIRE)<g_seed_n) plat_sleep_ns(100000000);
   FILE* d=fopen(SEED_TR_PATH,"wb"); if(d){ fwrite("SWRSTR03",1,8,d);   /* 03: after the reverted jump-table try (02), redone without those */ fwrite(&g_seed_sig,8,1,d); fwrite(&g_seed_n,4,1,d); fwrite(g_seed_ok,1,g_seed_n,d); fclose(d); }
-  seed_ans_pass(); }
+  seed_ans_pass(); __atomic_store_n(&g_seed_tr_done,1,__ATOMIC_RELEASE); }
 /* GL thread: an answer's translation to the helper processes (NVIDIA), unless its program is built already */
 static void seed_ans_job(SeedTr* t){
   if(g_helper<=0 || !backend_shader_helper_alive() || !hp_job_worth(t->src)) return;
@@ -5070,7 +5078,7 @@ static int seed_feed(void){
   { /* the game first: at most 2 a frame, and none in a frame after one that ran long */
     static u32 ff, fn; static u64 ft; static int slow;
     if(ff!=g_frame){ u64 now=plat_ns(); slow= ft && now-ft>20000000ull; ff=g_frame; ft=now; fn=0; }
-    if(slow || fn>=2) return 0; fn++; }
+    if(!g_prepare && (slow || fn>=2)) return 0; fn++; }   /* preparing at boot: no game to leave room for */
   SeedEnt* e=NULL; u32 ei=0;
   while(g_seed_next<g_seed_n && g_seed_next<g_seed_drained){ u32 i=g_seed_next++; SeedEnt* q=&g_seed[i]; int ok= g_seed_ok && g_seed_ok[i];
     if(ok && !(g_seed_built && g_seed_built[i]) && !mp_seen(q->h,q->stage)){ e=q; ei=i; break; } }   /* skipped: not translatable ahead, built before, or the game had it already */
@@ -5082,6 +5090,36 @@ static int seed_feed(void){
   g_mp[g_mp_n++]=(MemProg){c,e->len+64,e->stage,e->h,(1ull<<63)|ei /* t: from the seed (bit 63) and its index; not for the boot list */}; pm_unlock(&g_mp_m);
   if(g_seed_next==g_seed_n) LOG("shaders: every program of the seed has been taken by the pre-build (%u)\n",g_seed_n);
   return 1; }
+/* ---- preparing shaders before play (main.c holds the game at its first image while this says "not done"). The seed's
+   translations, the shader list, the helpers' builds and the draw-state warm-up (shader_helper.inc) all finish here, with
+   a progress bar and the window title, instead of during play. Esc skips it; SWR_NO_PREPARE=1: off */
+static u32 prep_file_recs(const char* path, u32 rec){ FILE* f=fopen(path,"rb"); if(!f) return 0; _fseeki64(f,0,SEEK_END); long long n=_ftelli64(f); fclose(f); return n>0? (u32)(n/rec) : 0; }
+static u32 prep_jobs_left(void){ u32 n=0; PDir d; if(plat_dir_open(&d,"shader_cache/jobs")) return 0;
+  while(plat_dir_next(&d)){ size_t l=strlen(d.name); if(d.is_dir) continue; if((l>5 && !strcmp(d.name+l-5,".pjob")) || (l>4 && !strcmp(d.name+l-4,".job")) || strstr(d.name,".c")) n++; }
+  plat_dir_close(&d); return n; }
+int gpu_gl_prepare_status(char* msg, int cap, float* frac){
+  if(!g_nv_win || g_mp_on==0 || g_helper==0 || !g_pcache){ snprintf(msg,cap,"nothing to prepare"); *frac=1; return 1; }   /* the helpers build ahead only on NVIDIA */
+  if(g_mp_on<0 || g_helper<0){ snprintf(msg,cap,"Preparing shaders: starting"); *frac=0; return 0; }   /* the first image can come before the helpers are up */
+  int ready=__atomic_load_n(&g_seed_ready,__ATOMIC_ACQUIRE), trd=__atomic_load_n(&g_seed_tr_done,__ATOMIC_ACQUIRE);
+  u32 n=g_seed_n? g_seed_n : 1, drained=__atomic_load_n(&g_seed_drained,__ATOMIC_ACQUIRE);
+  pm_lock(&g_mp_m); int mp_left= g_mp_next<g_mp_n; pm_unlock(&g_mp_m);
+  int sq_left= __atomic_load_n(&g_sq_r,__ATOMIC_RELAXED)!=__atomic_load_n(&g_sq_w,__ATOMIC_ACQUIRE);
+  int aw_left= __atomic_load_n(&g_aw_pend,__ATOMIC_RELAXED)>0;
+  static u64 jt; static u32 jobs; u64 now=plat_ns(); if(now-jt>500000000ull){ jt=now; jobs=prep_jobs_left(); }   /* the folder, twice a second */
+  char pp[200], wp[200]; snprintf(pp,sizeof pp,"shader_cache/pipes_%s.bin",g_pc_tag); snprintf(wp,sizeof wp,"shader_cache/pipes_warm_%s.bin",g_pc_tag);
+  u32 pipes=prep_file_recs(pp,(u32)sizeof(PipeRec)), warm=prep_file_recs(wp,8);
+  static u32 last_warm; static u64 warm_still; if(!warm_still || warm!=last_warm || jobs){ last_warm=warm; warm_still=now; }   /* the clock starts at the first look */
+  int warm_done= !pipes || warm>=pipes || (!jobs && now-warm_still>10000000000ull);   /* or no progress for 10 s with nothing left to build: the rest waits for programs no list has */
+  float a= !ready? 0.0f : (float)drained/(float)n, b= g_seed_next>=g_seed_n? 1.0f : (float)g_seed_next/(float)n, c= pipes? (float)(warm<pipes? warm : pipes)/(float)pipes : 1.0f;
+  *frac= 0.35f*a + 0.35f*b + 0.30f*c;
+  int done= ready && trd && drained>=g_seed_n && g_seed_next>=g_seed_n && !mp_left && !sq_left && !aw_left && !jobs && warm_done;
+  if(!ready) snprintf(msg,cap,"Preparing shaders: reading the game's shaders");
+  else if(drained<g_seed_n) snprintf(msg,cap,"Preparing shaders: translating %u of %u (Esc skips)",drained,g_seed_n);
+  else if(g_seed_next<g_seed_n || mp_left || sq_left || aw_left || jobs) snprintf(msg,cap,"Preparing shaders: building, %u left (Esc skips)",jobs);
+  else if(!warm_done) snprintf(msg,cap,"Preparing shaders: warming draw states %u of %u (Esc skips)",warm,pipes);
+  else snprintf(msg,cap,"Shaders ready");
+  { static u64 st; if(now-st>1000000000ull || done){ st=now; backend_status(done? NULL : msg); } }
+  return done; }
 static void mem_prebuild_step(void){
   /* NVIDIA on Windows: through the shader helper process, whose compiles can't block the game (shader_helper.inc). In the
      game's own driver (SWR_NV_PREBUILD=1, tried on by default 2026-11-07): glCreateProgram took 50-117 ms on the GL thread
@@ -5112,8 +5150,9 @@ static void mem_prebuild_step(void){
   extern volatile unsigned long long g_video_last_ns;
   int pb_ok= g_lf_light && plat_ns()-g_video_last_ns>2000000000ull;   /* loading or fade, no video in the last 2 s */
   int pb_go= g_helper>0? (plat_ns()-g_video_last_ns>2000000000ull && pb_n<(u32)pb_cpf) : (pb_ok && pb_n<(u32)pb_cpf && g_frame-g_cpf_frame>=2);   /* helper: any time but during a video (translating is the only cost here) */
-  while(g_mpj_n<63 && plat_ns()-t0<1500000ull && (g_worker==1 || pb_go) && g_pcj_n<64){
-    if(g_worker!=1 && pb_n>=(u32)pb_cpf) break;   /* NVIDIA: only when the draws started none this frame or the last */   /* at most 1.5 ms of translating per loop (a slot kept for a variant) */
+  if(g_prepare && g_helper>0) pb_go=1;   /* preparing at boot: as fast as the helpers take them */
+  while(g_mpj_n<63 && plat_ns()-t0<(g_prepare? 50000000ull : 1500000ull) && (g_worker==1 || pb_go) && g_pcj_n<64){
+    if(g_worker!=1 && pb_n>=(u32)pb_cpf && !(g_prepare && g_helper>0)) break;   /* NVIDIA: only when the draws started none this frame or the last */   /* at most 1.5 ms of translating per loop (a slot kept for a variant) */
     pm_lock(&g_mp_m); int empty= g_mp_next>=g_mp_n; pm_unlock(&g_mp_m);
     if(empty && !seed_feed()) break;   /* the game's own new shaders first, then the seed's */
     pm_lock(&g_mp_m); MemProg mp= g_mp_next<g_mp_n? g_mp[g_mp_next++] : (MemProg){NULL,0,0}; pm_unlock(&g_mp_m);

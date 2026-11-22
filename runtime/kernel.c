@@ -722,6 +722,14 @@ void swr_svc(CPU* c, u32 imm){
      after the mod by melos444 on GameBanana, whose cheat form can't work on recompiled code). Saturates like the mod */
   /* not a system call either: a cheat rebuilt as a hook (cheats.c, beyond_patches.json) */
   if(imm>=0xFF80 && imm<=0xFF90){ extern void cheats_native(CPU*,u32); cheats_native(c,imm-0xFF80); return; }
+  /* the game's input-action reader (svc_hid.c: aim_axis_hook) */
+  if(imm==0xFFE1 || imm==0xFFE2){ extern void aim_axis_hook(CPU*,int); aim_axis_hook(c,imm==0xFFE2); return; }
+  if(imm==0xFFE3){ extern void aim_look_hook(CPU*); aim_look_hook(c); return; }   /* the look update's turn speed */
+  if(imm==0xFFE5 || imm==0xFFE6){ extern void aim_val_hook(CPU*,int); aim_val_hook(c,imm==0xFFE6); return; }   /* an action's value */
+  if(imm==0xFFE7 || imm==0xFFE8){ extern void aim_src_hook(CPU*,int); aim_src_hook(c,imm==0xFFE8); return; }   /* an input source's value */
+  if(imm==0xFFE9){ extern void aim_cam_hook(CPU*); aim_cam_hook(c); return; }   /* the camera turn's yaw rate and pitch */
+  if(imm==0xFFEA){ extern void aim_cam_entry(CPU*); aim_cam_entry(c); return; }   /* its start: the step's frame time */
+  if(imm==0xFFE4){ extern void aim_ctl_hook(CPU*); aim_ctl_hook(c); return; }   /* the player control's look stick values */
   if(imm==0xFFE0){ extern int g_opt_green10; if(g_opt_green10){ long long v=(long long)(int)(u32)c->x[9]*10; if(v>0x7FFFFFFFll) v=0x7FFFFFFFll;
       V128* p=&c->v[0]; p->d[0]=0; p->d[1]=0; p->f[0]=(f32)(int)v; static int said; if(said<8){ said++; LOG("mods: Green Energy award %d -> %lld\n",(int)(u32)c->x[9],v); } } return; }
   u64 a0=c->x[0],a1=c->x[1],a2=c->x[2];

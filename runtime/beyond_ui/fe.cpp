@@ -487,6 +487,8 @@ static void page_play() {
         UpStage us = update_state().stage;
         if (g_auto_installing && (us == UP_AVAILABLE || us == UP_DOWNLOADING)) flash("Installing the new version first: PLAY again when it's done.");
         else if (ready) g_play = true; else go(PG_SETUP); }
+    ImGui::SameLine(0, S(16));   // issue 27: a way out without Alt+F4 or the window's X (hidden in fullscreen)
+    if (big_button("##quit", "QUIT", {S(180), S(86)}, false)) { if (g_job.running) flash("Setup is still running: stop it on the Setup page first."); else g_quit = true; }
     ImGui::SetCursorScreenPos({p.x, hb.y}); ImGui::Dummy({1, S(16)});
     // the saves as cards: your own game, each set, and a card that keeps the save in use as a new set
     {
@@ -724,7 +726,7 @@ static void page_controls() {
                            {"Morph Ball: bomb / power bomb", "Left click / F"}, {"Morph Ball: boost (hold, release)", "Space"}, {"Morph Ball: spring / spider (hold)", "Q / right click"},
                            {"Vi-O-La: go / brake / boost", "Left click or F / Shift or right click / Space"}, {"Vi-O-La: fire / get off", "E / V"}, {"Right stick click", "T"},
                            {"Vi-O-La", "V"}, {"Pick shot (Ice, Thunder, Missile, Fire)", "1 2 3 4"}, {"Game menu", "Esc or Tab"}, {"Menus: confirm / back", "Enter / Backspace"},
-                           {"D-pad", "Arrow keys"}, {"Settings menu", "F1"}, {"Screenshot", "F3 (F8 full resolution)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"}};
+                           {"D-pad", "Arrow keys"}, {"Settings menu", "F1"}, {"Quit the game", "F1 menu > QUIT GAME, or Alt+F4"}, {"Screenshot", "F3 (F8 full resolution)"}, {"Record video", "F7"}, {"Fullscreen", "F11 or Alt+Enter"}};
     for (auto& r : kb) row_text(r[0], r[1]);
 }
 

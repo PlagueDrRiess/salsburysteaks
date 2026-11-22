@@ -42,8 +42,25 @@ static void npad_setup(u8* base, int idx, u32 style, u32 devtype){
 }
 
 u64 g_pad_buttons_now;   /* cheats.c: keypress codes */
+#ifdef SWR_DEVTOOLS
+#include "local/aim_dev.inc"   /* developer tools: the aim scan and the camera hooks' tests (not in the repository) */
+#else
+/* public builds: the game code has no hooks for svc 0xFFE1-0xFFEA (kernel.c), and the raw mouse counters
+   (backend_win32.c) are never used, so mouse_mode=raw falls back to the stick */
+volatile long long g_raw_mx, g_raw_my; volatile unsigned long long g_raw_used_ns; char g_test_shot[64];
+void aim_axis_hook(CPU* c, int at_exit){ (void)c; (void)at_exit; }
+void aim_look_hook(CPU* c){ (void)c; }
+void aim_ctl_hook(CPU* c){ (void)c; }
+void aim_val_hook(CPU* c, int at_exit){ (void)c; (void)at_exit; }
+void aim_src_hook(CPU* c, int at_exit){ (void)c; (void)at_exit; }
+void aim_cam_entry(CPU* c){ (void)c; }
+void aim_cam_hook(CPU* c){ (void)c; }
+static void aim_scan_tick(void){}
+#endif
+
 void hid_update(void){
   if(!g_hid_shm) return;
+  aim_scan_tick();
   u8* b=kshmem_ptr(g_hid_shm);
   g_samp++;
   u8 st[0x28]; memset(st,0,sizeof st);

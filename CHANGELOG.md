@@ -4,6 +4,34 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.29
+
+### Shaders are prepared before you play (NVIDIA, OpenGL and Vulkan output)
+The game now waits on its own logo until the shaders it knows of are built, instead of building them while you play
+(the cause of the held pictures, ghosting and cutscene desync in issues 8 and 18). A thin bar under the logo shows the
+progress, and **Esc** goes straight on.
+- The wait uses every spare CPU thread, then goes back to the usual three helpers for play.
+- The draw states NVIDIA's driver compiles at first use are drawn once ahead of time too, so the driver keeps them.
+- **The first start from an empty shader cache takes long:** about 30 minutes on a 12-thread CPU (it goes on after
+  30 minutes at most). Later starts find everything built and go straight in. Keeping the `shader_cache` folder when
+  you update keeps that work.
+
+### Fewer hitches from textures
+A compressed texture's upload asked the graphics driver a question that made it wait for all of the frame's queued
+work, 13-36 ms each time a texture loaded. It doesn't ask any more. In a recorded play session the worst frame went
+from 251 ms to 93 ms.
+
+### A way to quit (issue 27)
+- **QUIT** next to PLAY on the Play screen.
+- The controls list says where it is in the game: F1 (or Home) opens the menu, QUIT GAME is at its bottom. Esc opens
+  the game's own pause menu, which has no quit, like on the Switch.
+- With Native Vulkan, where that menu can't show yet, F1 asks "Quit the game now?" instead.
+
+### Radeon RX cards: the very first start too (issues 1, 11, 16, 26)
+2026.11.28 moves Radeon RX cards to Native Vulkan, but only once the settings file had a renderer line, so the very
+first start still began on OpenGL and crashed. It now applies from the first start, and Radeon PRO cards (the same
+driver) are included.
+
 ## 2026.11.28
 
 ### Radeon RX cards start the game (issues 1, 11, 16, 26)
