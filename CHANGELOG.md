@@ -4,6 +4,13 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.33
+
+### Scanning works with the mouse again
+In the scan visor, right click (lock on, which scans) acted as B, because the game's camera doesn't run there and the
+mouse took it for a menu. Right click now keeps its binding once play has started; it is B only on the title and file
+select screens. Left click is still A in menus, and Back in the pause menu and map is B (Space or Backspace).
+
 ## 2026.11.32
 
 ### Ultrawide renders a real wide picture (issue 17)

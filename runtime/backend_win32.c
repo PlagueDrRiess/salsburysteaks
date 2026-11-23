@@ -726,9 +726,19 @@ static u64 mouse_bits(void){
      clicking (2026-11-22: "I should not have to hit E each time"). A menu is when the game's gameplay camera hasn't run
      for 250 ms (svc_hid.c aim_cam_hook) and ZL isn't held: locked onto an enemy the camera stops too, and there the
      buttons must keep shooting */
-  { extern volatile unsigned long long g_cam_seen_ns; extern u64 g_pad_buttons_now; u64 cs=g_cam_seen_ns;
-    if((!cs || plat_ns()-cs>250000000ull) && !((g_pad_buttons_now>>8)&1)){   /* !cs: no gameplay yet (title, file select) */
-      if(btn&1) k|=1ull<<0; if(btn&2) k|=1ull<<1; for(int i=2;i<5;i++) if(btn>>i&1) k|=g_bind_mouse[i];
+  /* The scan visor doesn't run that camera: there the right button turned into B, so locking onto a scannable (which is
+     what scans it) did nothing (2026-11-23). The aim update (svc_hid.c aim_look_hook) runs there too: play is either */
+  { extern volatile unsigned long long g_cam_seen_ns, g_ret_seen_ns; extern u64 g_pad_buttons_now; u64 cs=g_cam_seen_ns, rs=g_ret_seen_ns, now=plat_ns();
+    int menu= (!cs || now-cs>250000000ull) && (!rs || now-rs>250000000ull) && !((g_pad_buttons_now>>8)&1);   /* !cs: no gameplay yet (title, file select) */
+    { static int was=-1, said; if(menu!=was){ was=menu; if(said<40){ said++; LOG("mouse: clicks %s (camera %s, aim %s)\n",menu? "are A/B (menu)" : "follow the bindings (play)",
+        cs? (now-cs<250000000ull? "running" : "stopped") : "not yet",rs? (now-rs<250000000ull? "running" : "stopped") : "not yet"); } } }
+    /* Neither runs in the scan visor either (2026-11-23 log: both stopped for 23 s while scanning), so the right button
+       is B only before play has started (title, file select); after that it keeps its binding (lock on, which scans).
+       Back in the pause menu and the map is B (Space or Backspace) */
+    if(menu){
+      if(btn&1) k|=1ull<<0;
+      if(btn&2) k|= (!cs && !rs)? 1ull<<1 : g_bind_mouse[1];
+      for(int i=2;i<5;i++) if(btn>>i&1) k|=g_bind_mouse[i];
       return k; } }
   for(int i=0;i<5;i++) if(btn>>i&1) k|=g_bind_mouse[i];
   /* the game's Pointer scheme shoots with A, not ZR (2026-11-14: left click did nothing there): with the mouse driving
