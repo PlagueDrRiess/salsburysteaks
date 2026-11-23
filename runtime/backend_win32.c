@@ -901,7 +901,7 @@ void frontend_frame(void){
     static u64 heartbeat;u64 now=plat_ns();if(!heartbeat||now-heartbeat>=1000000000ull){heartbeat=now;LOG("test heartbeat: frame=%d fps_limit=%d ns=%llu\n",g_frames,g_opt_fps,(unsigned long long)now);}
     /* SWR_TEST_CRASH_FRAME=N: a crash inside a C-library DLL on this runtime thread (tests the crash report) */
     { const char*cr=getenv("SWR_TEST_CRASH_FRAME"); if(cr&&(u64)g_frames>=strtoull(cr,NULL,10)){ void*(*volatile ms)(void*,int,size_t)=memset; ms((void*)(uintptr_t)0x10,0,16); } }
-    const char*stop=getenv("SWR_TEST_EXIT_FRAME");if(stop&&(u64)g_frames>=strtoull(stop,NULL,10)){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}log_flush();fflush(NULL);ExitProcess(0);}
+    const char*stop=getenv("SWR_TEST_EXIT_FRAME");if(stop&&(u64)g_frames>=strtoull(stop,NULL,10)){LOG("test complete: frame=%d\n",g_frames);extern void save_hints(void);save_hints();if(getenv("SWR_VK_RECIPES_RECORD")){extern void snxvk_exit(void);snxvk_exit();}log_flush();fflush(NULL);{extern void plat_prof_quiesce(void);plat_prof_quiesce();}ExitProcess(0);}
   }
 
   { extern char g_test_shot[64]; if(g_test_shot[0]){ char p[MAX_PATH]; CreateDirectoryA("captures",NULL); snprintf(p,sizeof p,"captures/aimtest_%s",g_test_shot); g_test_shot[0]=0; gpu_gl_screenshot(p); } }   /* svc_hid.c's automated aim tests */
@@ -909,7 +909,7 @@ void frontend_frame(void){
     snprintf(p,sizeof p,"captures/screenshot_%04d%02d%02d_%02d%02d%02d",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond); gpu_gl_screenshot(p); }
   if(g_seconds && plat_ns()-g_start>=(u64)g_seconds*1000000000ull){
     u64 h=gpu_gl_screenshot(g_shot[0]? g_shot : NULL); fprintf(stderr,"\nframes=%d hash=%016llx\n",g_frames,(unsigned long long)h);
-    extern void save_hints(void); save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } log_flush(); fflush(NULL); ExitProcess(0); }
+    extern void save_hints(void); save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } log_flush(); fflush(NULL); { extern void plat_prof_quiesce(void); plat_prof_quiesce(); } ExitProcess(0); }
 }
 
 int backend_glq_ok(void){ return 1; }   /* GL calls go through glq */

@@ -4,6 +4,35 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.32
+
+### Ultrawide renders a real wide picture (issue 17)
+At 21:9 and 32:9 (`aspect` in Display) the game now draws a picture that really is that wide: 2104x900 or 3200x900
+before the resolution scale, instead of a 16:9 picture stretched sideways. The HUD, the radar, the map and menu text
+keep their true shapes, and you see more of the world at the sides with the same view up and down.
+- **Menus and the map:** the icon bar, visor frame and menu backdrop now fit the wide screen; the backdrop reaches the
+  edges and the icons keep their shape.
+- **Visor glass:** the effect on the visor glass now covers the whole wide view, without hard edges at the sides.
+- **Cutscenes:** the black bars cutscenes slide in are left out at 21:9 and wider, where the picture is already that
+  shape.
+- The combat HUD stays where the game puts it on the visor, around the middle.
+- On a 16:9 monitor a wider aspect shows with bars above and below; on an ultrawide monitor it fills the screen.
+- A change of aspect takes effect after a restart. A wider picture is more pixels to draw (32:9 is twice 16:9).
+- The update rebuilds the game code once (a few minutes): it needs 19 small additions for this. 16:9 is unchanged.
+
+### Cutscene freezes and sound out of step (issue 8)
+On a first visit, a cutscene's camera cut could freeze the game for seconds while the NVIDIA driver rebuilt shaders
+for draw states it hadn't seen (13 s on an RTX 4080). The cutscene then jumped ahead, and the sound stayed behind.
+- The release now ships the draw states our play-throughs met (`recompiler/beyond/pipe-list.bin`, no game code), and
+  the "Preparing shaders" screen warms them before play, so the driver has them ready. The first start after the
+  update may hold a little longer.
+- After a long freeze the sound now catches up with the picture (up to 30 s; it was 2 s).
+
+### The game no longer hangs on exit
+With `profile=1`, closing the game could leave its process stuck, holding its memory, until it was ended in Task
+Manager: the profiler had paused the closing thread for a moment and was ended before it could resume it. It now stops
+before the game closes.
+
 ## 2026.11.31
 
 ### Native mouse aim (issue 28)

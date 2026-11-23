@@ -1430,6 +1430,22 @@ static char* sh_nan_guard(char* src){
   char* out=malloc(strlen(src)+n*(strlen(outs)+8)+16); char* w=out; const char* q=src;
   while(*q){ if(!strncmp(q,"return;",7)){ w+=sprintf(w,"{ %sreturn; }",outs); q+=7; } else *w++=*q++; }
   *w=0; free(src); return out; }
+/* ultrawide: the menus' backdrop, visor frame and icon bar share one 16 x 9 orthographic camera, which cheats.c widens
+   to the picture's shape so the icons keep theirs. The backdrop panels are exactly as wide as that 16 x 9 box, so
+   they no longer reached the sides (the paused game showed there). Their quad shader pushes a corner lying on the
+   box's edge out to the picture's edge (swr_vp.z = how much wider the picture is; 0 = off). Only flat (w = 1)
+   geometry exactly on the edge moves, so the icons and text inside keep their shape */
+static char* sh_edge(char* src, int stage, u64 h){
+  if(stage!=ST_VS || !src || h!=0x9dd4d684d4b65e64ull || strstr(src,"swr_edge")) return src;
+  char* m=strstr(src,"void main(){"); if(!m) return src;
+  static const char* fn="void swr_edge(){ if(swr_vp.z>1.0 && abs(gl_Position.w-1.0)<0.0001){ float l=1.0/swr_vp.z, e=abs(gl_Position.x);\n"
+    "  if(e>l*0.985 && e<l*1.015) gl_Position.x=sign(gl_Position.x); }\n  if(swr_vp.w>0.0) gl_Position.x*=swr_vp.w; }\n";
+  static const char* pat="{ gl_Position.y *= swr_vp.x;"; size_t pl=strlen(pat), n=0; for(const char* q=src;(q=strstr(q,pat));q+=pl) n++;
+  if(!n) return src;
+  char* out=malloc(strlen(src)+strlen(fn)+n*16+16); size_t pre=(size_t)(m-src); memcpy(out,src,pre); out[pre]=0; strcat(out,fn);
+  char* o=out+strlen(out); const char* q=m;
+  while(*q){ if(!strncmp(q,pat,pl)){ o+=sprintf(o,"{ swr_edge(); gl_Position.y *= swr_vp.x;"); q+=pl; } else *o++=*q++; }
+  *o=0; free(src); return out; }
 static char* sh_post(char* src, int stage){
   /* alpha test: discard before every return */
   if(stage==ST_FS && src && strstr(src,"out vec4 frag_color0")){ char* p=strstr(src,"void main(){"); if(p){ size_t pre=p-src;
@@ -1490,6 +1506,7 @@ static Sh* shader_get(u64 gva_code, int stage, u32 attr_int, u32 attr_sint){
     if(src && !trans_overflow) ans_record(h,stage,key2,&ans_in,trans_ndep,trans_dep);}
   if(stage==ST_FS) src=sh_dbg(src,h);
   if(stage==ST_FS) src=sh_view(src,h);
+  src=sh_edge(src,stage,h);
   GLenum ty= stage==ST_VS? GL_VERTEX_SHADER : stage==ST_FS? GL_FRAGMENT_SHADER : stage==ST_GS? GL_GEOMETRY_SHADER : stage==ST_CS? GL_COMPUTE_SHADER : stage==ST_TCS? GL_TESS_CONTROL_SHADER : GL_TESS_EVALUATION_SHADER;
   (void)ty; if(!src) s->failed=1;
   if(stage==ST_VS && g_vs_xfb) src=vs_xfb_apply(src,g_vs_xfb);   /* the game's transform feedback (its own variant) */
@@ -1567,6 +1584,7 @@ static int g_helper=-1; static u32 g_hp_built, g_hp_fallback, g_hp_pre; static u
    (no constant buffers at pre-build): 346 of 761 queued in a run, each tens of seconds of CPU or "too many instructions",
    and no draw ever uses one: the draw translates the shader with its real table */
 static int hp_job_worth(const char* src){ const char* p=strstr(src,"switch(pc)"); if(!p) return 1; int n=0, nl=0; const char* q=p; while((q=strchr(q,'\n'))){ nl++; q++; } while((p=strstr(p,"    case ")) && n<=1000){ n++; p+=9; } return n<=1000 && !(n>200 && n*4>nl); }   /* a case every few lines: one per instruction, the stand-in */
+static void pipes_merge_release(void);   /* before the helpers start: they warm what the list adds */
 #ifdef _WIN32
 extern int backend_shader_helper_start(const char* tag); extern int backend_shader_helper_alive(void); extern int backend_file_exists(const char* path);
 #else
@@ -1868,7 +1886,7 @@ static int sh_sep_ready(Sh* s){
   if(g_worker==1 && !g_sync_draws && wr_push(&wq_hi,j)){ s->sj=j; s->sps=1; return 0; }
   /* NVIDIA: the shader helper process builds it (sps 6 above); a draw that must have it now still compiles it here */
   if(g_nv_win && g_par>0 && g_pcache>0 && !g_sync_draws && !g_must_wait && !s->nohelp && s->src){
-    if(g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
+    if(g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && (pipes_merge_release(), backend_shader_helper_start(g_pc_tag)); }
     if(g_helper>0 && backend_shader_helper_alive()){
       u32 sl=(u32)strlen(s->src), st=(u32)j->stype; u8* b=malloc((size_t)sl+20);
       if(b){ memcpy(b,"SWRJ",4); memcpy(b+4,&st,4); memcpy(b+8,&sl,4); memcpy(b+12,s->src,sl); memcpy(b+12+sl,"SWRJOBOK",8);
@@ -2384,6 +2402,29 @@ static void pipe_record(const u32* r, u64 kvs, u64 kfs, u64 kgs, GLenum mode){
   g_pipe_seen[i]=h; g_pipe_n++; g_pipe_new++;
   char path[200]; snprintf(path,sizeof path,"shader_cache/pipes_%s.bin",g_pc_tag); aw_write(path,&p,sizeof p,1);
   if(!(g_pipe_new%500)) LOG("shaders: %u new pipeline records this run (%u in all)\n",g_pipe_new,g_pipe_n); }
+/* The release's pipeline records (make_release.py ships beyond/pipe-list.bin as recompiler/beyond/pipe-list.bin):
+   the draw states our play-throughs met, added to this install's own at each start, so the prepare hold warms them
+   before play. Without them a state is only learned when first drawn: a cutscene's new states at a scene cut made
+   NVIDIA rebuild its programs right there, 13 s frozen on an RTX 4080 (issue 8, 2026-11-23), the cutscene then
+   jumping ahead of its sound. The records are program keys and target/blend state, no game code */
+static void pipes_merge_release(void){
+  static int done; if(done) return; done=1;
+  if(getenv("SWR_NO_PIPE_LIST")) return;
+  char lp[1200]; snprintf(lp,sizeof lp,"%srecompiler/beyond/pipe-list.bin",g_exedir);
+  FILE* rf=fopen(lp,"rb"); if(!rf) return;
+  char path[200]; snprintf(path,sizeof path,"shader_cache/pipes_%s.bin",g_pc_tag);
+  u64* seen=calloc(1u<<18,8); if(!seen){ fclose(rf); return; }
+  u32 have=0, added=0; PipeRec q;
+  { FILE* f=fopen(path,"rb"); if(f){ while(fread(&q,sizeof q,1,f)==1){ if(q.magic!=0x31504950u) break; u64 h=fast_hash((const u8*)&q,sizeof q,0)|1;
+        u32 i=(u32)(h^(h>>29))&0x3FFFF; while(seen[i] && seen[i]!=h) i=(i+1)&0x3FFFF; if(!seen[i]){ seen[i]=h; have++; } } fclose(f); } }
+  FILE* out=fopen(path,"ab");
+  if(out){ while(fread(&q,sizeof q,1,rf)==1){ if(q.magic!=0x31504950u) break; u64 h=fast_hash((const u8*)&q,sizeof q,0)|1;
+      u32 i=(u32)(h^(h>>29))&0x3FFFF; while(seen[i] && seen[i]!=h) i=(i+1)&0x3FFFF; if(seen[i] || have+added>=200000) continue;
+      seen[i]=h; fwrite(&q,sizeof q,1,out); added++;
+      if(g_pipe_seen){ u32 k=(u32)(h^(h>>29))&0x3FFFF; while(g_pipe_seen[k] && g_pipe_seen[k]!=h) k=(k+1)&0x3FFFF; if(!g_pipe_seen[k]){ g_pipe_seen[k]=h; g_pipe_n++; } } }   /* already read: not recorded twice */
+    fclose(out); }
+  fclose(rf); free(seen);
+  LOG("shaders: the release's draw states: %u added to this install's %u\n",added,have); }
 int g_opt_arm_large=0;   /* [Display] arm_cannon_large (main.c) */
 /* Samus's left hand shares the arm cannon's depth layer: drawn by these vertex shaders in the colour pass (F5 trace 004,
    2026-11-14: 6351 and 192 vertices, bottom edge left of centre). Its depth pass uses the arm's shared shaders, so the
@@ -3657,6 +3698,18 @@ static void e_ts_read(void* p){   /* GL thread, end of the traced frame: pairs -
   for(int i=0;i+1<r->n;i++) if(g_tsd[i]>0 && g_tsd[i+1]==-g_tsd[i]){ double us=(double)(t[i+1]-t[i])/1000.0; sum+=us; nd++; fprintf(f,"#%d %.1f\n",g_tsd[i],us); }
   fprintf(f,"# %d draws, %.2f ms of GPU time inside draws; first to last timestamp %.2f ms\n",nd,sum/1000.0,(double)(t[r->n-1]-t[0])/1e6);
   fclose(f); }
+/* ultrawide: draws the game sized for the 16:9 view that leave the wider picture's sides bare. Both use the plain
+   textured quad shaders. 1: the visor glass in front of the camera (its 288x152 texture), stretched sideways about
+   the centre to cover the wider view (sh_edge, swr_vp.w); 2: the cutscenes' black bars (an 8x8 texture through an
+   orthographic camera 18 units tall): at 21:9 and wider the picture is already that shape, so they are left out */
+static int uw_draw_kind(GpuChannel* ch, Sh* vs, Sh* fs){
+  extern float uw_k(void); if(uw_k()<=1.0f || !vs || !fs || vs->hash!=0x9dd4d684d4b65e64ull || fs->hash!=0x2ce2642d6803ea69ull || fs->si.ntex<1) return 0;
+  u32* r=ch->r3d; u32 hd=sh_tex_handle(4,r[0x982],&fs->si.tex[0]); u64 tb=((u64)r[0x55D]<<32)|r[0x55E]; u32 tic[8]; gmem_read(tb+(hd&0xFFFFF)*32ull,tic,32);
+  u32 w=(tic[4]&0xFFFF)+1, h=(tic[5]&0xFFFF)+1;
+  if(w==288 && h==152) return 1;
+  if(w==8 && h==8){ u64 ca=g_cb.cb[0][3]; if(!ca) return 0; float m[16]; gmem_read(ca,m,sizeof m);
+    if(fabsf_(m[5]-0.111111f)<0.0002f && fabsf_(m[1])<0.001f && m[15]==1.0f && m[3]==0.0f) return 2; }
+  return 0; }
 static void tr_draw(GpuChannel* ch, Sh* vs, Sh* fs, u64 vsa, u64 fsa, int indexed, u32 topology, u32 count, u32 instances){
   if(!g_tr_on || g_tr_n>=6000) return; u32* r=ch->r3d; g_tr_n++;
   float vt[6]; memcpy(vt,&r[0x280],24); float ref; memcpy(&ref,&r[0x4C4],4);
@@ -3795,6 +3848,8 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
     fs=&nullfs; }
   if(!vs || !fs){ st_noshader++; trace_note("DRAW SKIPPED: no shader\n"); return; }
   if(vs->failed || fs->failed){ st_shfail++; trace_note("DRAW SKIPPED: failed shader vs=%016llx(%d) fs=%016llx(%d)\n",(unsigned long long)vs->hash,vs->failed,(unsigned long long)fs->hash,fs->failed); return; }
+  int uwkind=uw_draw_kind(ch,vs,fs);   /* ultrawide: draws made for the 16:9 view */
+  if(uwkind==2){ trace_note("DRAW SKIPPED: cinematic bar (ultrawide)\n"); return; }
   Prog* p=NULL; GLuint vpp=0, atp=0; GLint vpl=-1, atl=-1;
   /* draws into tables (3D/array RTs, or <= 64x64) usually happen once at level load. if we skip them while the
      shader compiles the table stays empty forever, so wait for the compile here (one hitch) */
@@ -3878,7 +3933,8 @@ void r3d_draw_gl(GpuChannel* ch, int indexed, u32 topology, u32 first, u32 count
       LOG("debug: constant buffers of %016llx dumped (%d)\n",(unsigned long long)dh,nd); } }
   lighting_payload(fs);
 
-  { float vt[2]; memcpy(vt,&r[0x280],8); float fl[4]={ vt[1]<0? -1.f : 1.f, p_clip? 0.f : (float)(r[0x35F]&1), 0, 0 };
+  { float vt[2]; memcpy(vt,&r[0x280],8); extern float uw_overlay_k(void); float fl[4]={ vt[1]<0? -1.f : 1.f, p_clip? 0.f : (float)(r[0x35F]&1), uw_overlay_k(), 0 };
+    if(uwkind==1){ extern float uw_k(void); fl[3]=uw_k(); }   /* the visor glass: stretched sideways to the wide view */
     if(gs){ if(gs->uloc!=-1 && (!gs->lu_ok || memcmp(gs->lu,fl,16))){ memcpy(gs->lu,fl,16); gs->lu_ok=1; prog_u4(gs->sp,gs->uloc,0,fl); }
       fl[0]=1.f; fl[1]=0.f; }   /* the geometry stage transforms; the vertex stage hands over its positions as they are */
     if(vpl!=-1){ if(g_sep>0){ if(!vs->lu_ok || memcmp(vs->lu,fl,16)){ memcpy(vs->lu,fl,16); vs->lu_ok=1; prog_u4(vpp,vpl,0,fl); } } else prog_u4(vpp,vpl,0,fl); } }
@@ -4682,7 +4738,7 @@ static u64 g_warm_t0;
 static void warm_load(void){
   pcache_init();translated_load(); g_warm_t0=plat_ns();
   /* the helpers start first: shaders in the pack without a binary for this driver go straight to them (below) */
-  if(g_nv_win && g_par_bg && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
+  if(g_nv_win && g_par_bg && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && (pipes_merge_release(), backend_shader_helper_start(g_pc_tag)); }
   FILE* f=fopen(PACK_PATH,"rb"); if(!f) return; u32 cap=0;
   GLuint* wp=NULL; int wp_n=0, wp_cap=0;   /* programs loaded from binaries: their uniforms are looked up at boot (glq_uloc_prime) */
   /* the splash's progress bar: this loop is most of the wait between Play and the first frame (16 s of 18 for 7626
@@ -4813,6 +4869,7 @@ static void prebuild_shaders(void){
       else { trans_ndep=0; trans_overflow=0; g_shader_cb_read=pb_no_cb; src=shader_to_glsl(buf+o,avail,stage,&si); g_shader_cb_read=sh_cb_read;
         if(!src || si.unsupported){ free(src); failed++; continue; }
         src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src); translated_save(tk,&si,src); }   /* translated_save skips one that needed constant buffers */
+      src=sh_edge(src,stage,h);
       if(stage==ST_VS) src=dlg_vs_xfb(src);
       Sh* s=calloc(1,sizeof *s); s->stage=stage; s->hash=h; s->src=src; u64 key=sh_key(s);
       char bp[200]; snprintf(bp,sizeof bp,"shader_cache/%s_s%016llx.bin",g_pc_tag,(unsigned long long)key);
@@ -5082,6 +5139,7 @@ static void seed_ans_pass(void){
     t_ans=&a; t_seed_overflow=0; t_seed_ndep=0; g_shader_cb_read=seed_ans_cb; char* src=shader_to_glsl(code,e->len+64,stage,&si); g_shader_cb_read=NULL;
     if(!src || si.unsupported || t_seed_overflow){ free(src); failed++; continue; }
     src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src);
+    src=sh_edge(src,stage,e->h);
     static SeedTr t; t.tk=tk; t.stage=stage; t.idx=0; t.si=si; t.src=src; t.ndep=t_seed_ndep; memcpy(t.dep,t_seed_dep,t_seed_ndep*sizeof(TransDep)); t.ans=1;
     sq_push(&t); made++; }
   fclose(f); }
@@ -5108,6 +5166,7 @@ static void seed_tr_thread(void* arg){ (void)arg; plat_diag_role("shader-transla
       t_seed_overflow=0; t_seed_ndep=0; g_shader_cb_read=seed_no_cb; char* src=shader_to_glsl(code,e->len+64,stage,&si); g_shader_cb_read=NULL;
       if(!src || si.unsupported || t_seed_overflow){ free(src); g_seed_tr_skip++; break; }
       src=sh_post(src,stage); if(stage==ST_FS) src=sh_nan_guard(src);
+      src=sh_edge(src,stage,e->h);
       if(!v && stage==ST_FS && !getenv("SWR_NO_PREBUILD_INTTEX")){ int nt=si.ntex<32? si.ntex : 32;
         for(int k=0;k<nt;k++){ ShTex* st=&si.tex[k]; if(st->type==1 && st->fetch_only && !st->shadow) vtm|=1u<<k; } if(vtm) nv=2; }
       if(!v && stage==ST_VS && !getenv("SWR_NO_PREBUILD_INTTEX") && (vtm=vs_guess_int_attrs(src))) nv=2;
@@ -5215,7 +5274,7 @@ static void mem_prebuild_step(void){
      (300-390 ms frames), and the driver's background builds later blocked the GL thread 100-240 ms in play, one frame 1.9 s.
      Without it a cutscene's shaders only start building when it starts: 2026-11-08, a third of its draws (Samus, the
      marines) were missing for its whole length */
-  if(g_mp_on<0 && g_nv_win && g_par_bg && g_pcache>0 && g_helper<0){ g_helper= !getenv("SWR_NO_SHADER_HELPER") && backend_shader_helper_start(g_pc_tag); }
+  if(g_mp_on<0 && g_nv_win && g_par_bg && g_pcache>0 && g_helper<0){ g_helper=!getenv("SWR_NO_SHADER_HELPER") && (pipes_merge_release(), backend_shader_helper_start(g_pc_tag)); }
   ld_drain();
   if(g_mp_on<0){ g_mp_on= g_opt_prebuild && !g_gles && g_sep==1 && (g_worker==1 || (g_nv_win && g_par_bg && (g_helper>0 || getenv("SWR_NV_PREBUILD")))) && g_pcache>0 && !getenv("SWR_NO_MEM_PREBUILD");
     if(g_mp_on){ pm_init(&g_mp_m); if(plat_thread(mp_scan_thread,NULL,512*1024)) g_mp_on=0;
@@ -5273,6 +5332,7 @@ static void mem_prebuild_step(void){
       if(vtm){ nv=2; free(src); g_mp_found--; continue; } }
     if(!v && stage==ST_VS && !getenv("SWR_NO_PREBUILD_INTTEX") && (vtm=vs_guess_int_attrs(src))){ nv=2; free(src); g_mp_found--; continue; }
     { static int dp=-1; if(dp<0) dp=getenv("SWR_DUMP_PREBUILD")!=NULL; if(dp && stage==ST_VS){ char fp[200]; plat_mkdir("captures"); plat_mkdir("captures/pb"); snprintf(fp,sizeof fp,"captures/pb/%016llx_vs.glsl",(unsigned long long)h); FILE* f=fopen(fp,"w"); if(f){ fputs(src,f); fclose(f); } } }
+    src=sh_edge(src,stage,h);
     if(stage==ST_VS) src=dlg_vs_xfb(src);
     Sh tmp; memset(&tmp,0,sizeof tmp); tmp.stage=stage; tmp.hash=h; tmp.src=src; u64 key=sh_key(&tmp);
     int from_seed=(int)(mp.t>>63); u32 seed_idx=(u32)mp.t;

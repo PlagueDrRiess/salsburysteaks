@@ -85,9 +85,8 @@ static int am_csg(SvcObj* o, IpcCtx* c){           /* ICommonStateGetter */
     case 9: out8(c,1); return 0;                                     /* GetCurrentFocusState: InFocus */
     case 13: out_copy_h(c,ev_handle(kevent_new("sleep lock",0))); return 0;
     case 10: case 11: case 12: case 50: case 51: case 52: case 53: case 54: case 55: case 59: case 66: case 67: case 68: case 900: return 0;
-    case 60: out32(c,g_opt_docked? 1920 : 1280); out32(c,g_opt_docked? 1080 : 720); return 0;   /* GetDefaultDisplayResolution */
+    case 60: case 62: { extern void disp_res(int*,int*); int w,h; disp_res(&w,&h); out32(c,(u32)w); out32(c,(u32)h); return 0; }   /* GetDefaultDisplayResolution */
     case 61: out_copy_h(c,ev_handle(g_res_ev)); return 0;
-    case 62: out32(c,g_opt_docked? 1920 : 1280); out32(c,g_opt_docked? 1080 : 720); return 0;
     case 63: out_copy_h(c,ev_handle(g_res_ev)); return 0;
     case 100: out8(c,0); return 0;
     case 300: out32(c,0); return 0;                                  /* GetSettingsPlatformRegion */

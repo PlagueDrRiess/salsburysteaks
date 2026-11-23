@@ -1,6 +1,93 @@
 {
  "format": 2,
  "files": {
+  "code_005.c": {
+   "pristine": "551a12b9388ee65616f1d29a83f7a874123ffc4881831c1d77aaa73b04bb1fd0",
+   "result": "155babf15df83e3732e73886ef6d03bd15e672318566a63846410f2dc97cc220",
+   "hunks": [
+    [
+     20148,
+     20148,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ]
+   ]
+  },
+  "code_010.c": {
+   "pristine": "bc1b58afa58603461b458ffc7aca83cbc2c00d54ad75fa9822f95798390da803",
+   "result": "a0898162a6ba5b21b4c483e0626e961e22a9c3c12ff226eba8d299bc637d492e",
+   "hunks": [
+    [
+     10223,
+     10223,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ],
+    [
+     11848,
+     11848,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ],
+    [
+     15802,
+     15802,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ],
+    [
+     17028,
+     17028,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ],
+    [
+     22208,
+     22208,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ]
+   ]
+  },
+  "code_014.c": {
+   "pristine": "c8ec6880e17dd93468afb9cc57d70ec3c42380d70986bb1c52e9ec24c012f880",
+   "result": "1ab0a0d0673fde97366ce1ab053988ccf2ba7e14aef74a05dc8507888b3dcf2d",
+   "hunks": [
+    [
+     15108,
+     15108,
+     [
+      " c->rt->svc(c,0xFFD5);"
+     ]
+    ],
+    [
+     15264,
+     15264,
+     [
+      " c->rt->svc(c,0xFFD4);"
+     ]
+    ]
+   ]
+  },
+  "code_017.c": {
+   "pristine": "9da492e62b055254fc82f79a2555f7ef829d0430732a9baa6b9bdedf17c75a40",
+   "result": "17ef7d498e533264ee30ba88801391ae99b9859b0125fccd25318a5806bfa171",
+   "hunks": [
+    [
+     971,
+     971,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ]
+   ]
+  },
   "code_021.c": {
    "pristine": "c5798033c0aeea906cb975f468d469fff5a211d5060ebc6bc44e0fb2542a2cde",
    "result": "4b775ad8ab01417db3d3c835d956a9d48701a9a9f403d1ca17d5748e65809a9f",
@@ -34,6 +121,26 @@
     ]
    ]
   },
+  "code_027.c": {
+   "pristine": "855b3329786ff2bddb464f4568b31697928276acb4fcf7a6f36bd8057f2c05c3",
+   "result": "b6ac8eff355bd453e3bea8c4336972b706df63c4705b32dadcc0a215ba3a8262",
+   "hunks": [
+    [
+     20307,
+     20307,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ],
+    [
+     25459,
+     25459,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ]
+   ]
+  },
   "code_029.c": {
    "pristine": "032fffac359c5208ac2645e24e3f7a6796a4773451765d64922788e3fca8b8f4",
    "result": "0cdf9cef1b18e13fd71f527f874c9c5e4fc71e330285158846bbe713ff6b9af4",
@@ -56,6 +163,19 @@
      22899,
      [
       " c->rt->svc(c,0xFF8B);"
+     ]
+    ]
+   ]
+  },
+  "code_033.c": {
+   "pristine": "c14482af8a4e54223b1f0ccd080514ad43464c3c31689f81783a2ef276c0ae1d",
+   "result": "05feacec17a6386322858d2a77e6933a72b82a178630b9bbca0b68a0bb4ba225",
+   "hunks": [
+    [
+     19109,
+     19109,
+     [
+      " c->rt->svc(c,0xFFD1);"
      ]
     ]
    ]
@@ -120,6 +240,19 @@
     ]
    ]
   },
+  "code_080.c": {
+   "pristine": "844ff69d0291c48233a34448a084f960fdccc91d93bcc8a55c2ae1e2e2ddb333",
+   "result": "44d8171b476397e8ec2eab0a3d824e8e4eb329973db92f725850695f206182d2",
+   "hunks": [
+    [
+     6992,
+     6992,
+     [
+      " c->rt->svc(c,0xFFD6);"
+     ]
+    ]
+   ]
+  },
   "code_086.c": {
    "pristine": "12f222c042c81e0d9309f4a07ad26c2e266920190a4ce871da04d97336952095",
    "result": "350d110396718ed4e8c04bbd68dec1c5e7e8ac6518ce4418bddd26c341deb44b",
@@ -129,6 +262,26 @@
      44138,
      [
       " c->rt->svc(c,0xFF83);"
+     ]
+    ]
+   ]
+  },
+  "code_087.c": {
+   "pristine": "df0d61ad9dc4a5d14280f6cce08f2f3c98bc649026d6d15b4b8e1958c81ae0f5",
+   "result": "58efa1477d08af786f8e3b7e3313c6aa23e9bf070c6c65f52d9c6367ecc8b64d",
+   "hunks": [
+    [
+     10095,
+     10095,
+     [
+      " c->rt->svc(c,0xFFD4);"
+     ]
+    ],
+    [
+     12489,
+     12489,
+     [
+      " c->rt->svc(c,0xFFD3);"
      ]
     ]
    ]
@@ -155,6 +308,39 @@
      8699,
      [
       " c->rt->svc(c,0xFF8C);"
+     ]
+    ]
+   ]
+  },
+  "code_113.c": {
+   "pristine": "d768a222f59b582081f662dc2617b743d84e816581f4ea6593e6c9002b7dc9fd",
+   "result": "f9116d1b7d2e17bc9ac51ed807adf5b677daa81ae3caf709007d318f9657c556",
+   "hunks": [
+    [
+     38978,
+     38978,
+     [
+      " c->rt->svc(c,0xFFD1);"
+     ]
+    ]
+   ]
+  },
+  "code_117.c": {
+   "pristine": "1f9d924e799a5e53d2f3c96e7f03004f4871c48fbb699c125c597ddc01f8d8a8",
+   "result": "064555c2b69e640ad508375a8a1f024ea176050caf7965f89852795d5d984042",
+   "hunks": [
+    [
+     36788,
+     36788,
+     [
+      " c->rt->svc(c,0xFFD0);"
+     ]
+    ],
+    [
+     37256,
+     37256,
+     [
+      " c->rt->svc(c,0xFFD2);"
      ]
     ]
    ]
@@ -225,19 +411,6 @@
     ]
    ]
   },
-  "code_158.c": {
-   "pristine": "d0547f80dd85fd721aac8cf4ca819f8eb8d60c80792f2e51a49e2ccb050cb32b",
-   "result": "71cc3eed480cd51edb6453571f7912847cb53913bb671fa805d0927420df108d",
-   "hunks": [
-    [
-     11543,
-     11543,
-     [
-      " c->rt->svc(c,0xFF8E);"
-     ]
-    ]
-   ]
-  },
   "code_155.c": {
    "pristine": "ac2e47d7c809a97e29eddcdddd7ad874455eafea3c419b28916f67726bea8b72",
    "result": "592b72812ff580f05812c6f98cf022f635a82807f7057e8b1161a1dbd6bee913",
@@ -261,6 +434,32 @@
      33529,
      [
       " c->rt->svc(c,0xFFE3);"
+     ]
+    ]
+   ]
+  },
+  "code_158.c": {
+   "pristine": "d0547f80dd85fd721aac8cf4ca819f8eb8d60c80792f2e51a49e2ccb050cb32b",
+   "result": "71cc3eed480cd51edb6453571f7912847cb53913bb671fa805d0927420df108d",
+   "hunks": [
+    [
+     11543,
+     11543,
+     [
+      " c->rt->svc(c,0xFF8E);"
+     ]
+    ]
+   ]
+  },
+  "code_168.c": {
+   "pristine": "ca5ad2244ea4ab48ac419fa6e66476a67308979f0a0bee02becaadd8dcd6b215",
+   "result": "92a7ba9b98fb896801eb17362de45db86db5ce0262fc4bb70688d763fa5008c5",
+   "hunks": [
+    [
+     17619,
+     17619,
+     [
+      " c->rt->svc(c,0xFFD1);"
      ]
     ]
    ]

@@ -77,11 +77,14 @@ static unsigned __stdcall td_sampler(void*unused){(void)unused;plat_diag_role("h
    if(!active||r->tid==me)continue;
    u64 cpu=td_cpu(r->handle),rip=0,guest_id=0,entry=0,pc=0,lr=0,addr=0,key=0;int wait=0;i64 timeout=0;char guest_name[64]={0};
    int host_wait=__atomic_load_n(&r->wait_kind,__ATOMIC_ACQUIRE);u64 object=r->wait_object,caller=r->wait_caller;
-   if(!no_suspend&&SuspendThread(r->handle)!=(DWORD)-1){CONTEXT cx={0};cx.ContextFlags=CONTEXT_CONTROL;
+   extern int plat_samp_begin(void);extern void plat_samp_end(void);
+   if(!no_suspend&&!plat_samp_begin())return 0;
+   if(!no_suspend&&SuspendThread(r->handle)==(DWORD)-1)plat_samp_end();
+   else if(!no_suspend){CONTEXT cx={0};cx.ContextFlags=CONTEXT_CONTROL;
     if(GetThreadContext(r->handle,&cx))rip=cx.Rip;
     KThread*t=r->guest;if(t){guest_id=t->id;entry=t->entry;pc=t->cpu.pc;lr=t->cpu.x[30];wait=t->wait_kind;addr=t->wait_addr;timeout=t->wait_timeout;key=t->wait_key;
      if(wait&&t->wait_name)for(int j=0;j<63&&t->wait_name[j];j++){char c=t->wait_name[j];guest_name[j]=c==','||c=='\n'||c=='\r'?'_':c;}}
-    ResumeThread(r->handle);
+    ResumeThread(r->handle);plat_samp_end();
    }else if(no_suspend){KThread*t=r->guest;if(t){guest_id=t->id;entry=t->entry;pc=t->cpu.pc;lr=t->cpu.x[30];wait=t->wait_kind;addr=t->wait_addr;timeout=t->wait_timeout;key=t->wait_key;
      if(wait&&t->wait_name)for(int j=0;j<63&&t->wait_name[j];j++){char c=t->wait_name[j];guest_name[j]=c==','||c=='\n'||c=='\r'?'_':c;}}}
    HMODULE module=NULL;char name[MAX_PATH]="unknown";

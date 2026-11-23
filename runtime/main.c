@@ -718,6 +718,9 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   { static int once; if(!once){ once=1; if(getenv("SWR_VT")) vt_set(1); } }   /* test smooth clock w/o recording */
   if(limiter_trace)trace_enqueued=plat_ns();
   g_frames++; vt_frame();
+  { /* test only: SWR_TEST_FREEZE=frame:ms stalls the images once, like a driver stall at a cutscene's scene cut */
+    static int fr=-2, ms; if(fr==-2){ const char* e=getenv("SWR_TEST_FREEZE"); fr=-1; if(e && sscanf(e,"%d:%d",&fr,&ms)!=2) fr=-1; }
+    if(fr>=0 && g_frames==fr){ LOG("test: frozen for %d ms\n",ms); plat_sleep_ns((i64)ms*1000000); } }
   { /* A/V hold (svc_core.c audio_clock): a hitch of 40-400 ms puts the images that much behind the sound; the sound's
        clock is held back by the same amount so the images catch up. Longer gaps are loads, which the game times itself */
     static int on=-1; static u64 last; if(on<0) on=!getenv("SWR_NO_AV_HOLD"); u64 now=plat_ns();
@@ -921,7 +924,7 @@ int swr_main(int argc, char** argv){
   { /* Play screen / first-run setup in the game window (beyond_ui/fe.cpp; on Linux its own window); returns 0 = start the game, 1 = quit */
     extern int backend_frontend(int argc, char** argv, const char* exedir, const char* exename);
 #ifdef _WIN32
-    if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); TerminateProcess(GetCurrentProcess(),0); } }
+    if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); { extern void plat_prof_quiesce(void); plat_prof_quiesce(); } TerminateProcess(GetCurrentProcess(),0); } }
 #else
     if(backend_frontend(argc,argv,g_exedir,g_exename)){ log_flush(); fflush(NULL); _exit(0); } }
 #endif
@@ -995,6 +998,7 @@ int swr_main(int argc, char** argv){
   save_hints(); { extern void gpu_gl_rec_finish(void); gpu_gl_rec_finish(); } { extern void snxvk_exit(void); snxvk_exit(); } LOG("Exit.\n"); log_flush(); fflush(NULL);
   { extern void launcher_on_exit(void); launcher_on_exit(); }
 #if defined(_WIN32)
+  { extern void plat_prof_quiesce(void); plat_prof_quiesce(); }   /* no thread left suspended by the profiler (plat.c) */
   TerminateProcess(GetCurrentProcess(),0);   /* don't join the guest threads */
 #endif
   _exit(0);
@@ -1070,8 +1074,10 @@ int audren_update(SvcObj* o, IpcCtx* c){
       /* Late by more than 40 ms: the rest used to be thrown away (owed>8 -> 8), so sound lost that time for good: 4.2 s in an 18
          minute session, voices behind the animation after every hitch (the F5 capture alone cost 0.25 s). On the console the
          audio keeps running through a stall, so it is all caught up now; what doesn't fit the output queue is dropped from the
-         output, not from the clock. Past 2 s (a real freeze) the rest is let go */
-      if(owed>400){ static int said; if(said<8){ said++; LOG("audio: the game was %.1f s late to update the sound: the rest of that time is lost\n",owed*0.005); } owed=400; }
+         output, not from the clock. Past 30 s (the game paused, not a hitch) the rest is let go.
+         It was 2 s: a 13 s freeze at a cutscene's scene cut (issue 8, 2026-11-23) left the sound 11 s behind the cutscene,
+         which the game keeps on the clock and jumped ahead to catch up */
+      if(owed>6000){ static int said; if(said<8){ said++; LOG("audio: the game was %.1f s late to update the sound: the rest of that time is lost\n",owed*0.005); } owed=6000; }
       blocks=(u32)owed; owed-=blocks; memcpy(&o->u[7],&owed,8); }
     o->u[6]=now;
     { extern int g_audio_status_only; g_audio_status_only= blocks==0; audio_render(o,ih,in,is,voices_in,nvoices,q); g_audio_status_only=0; }

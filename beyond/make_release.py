@@ -153,11 +153,13 @@ def release(out, exe, version):
     for f in RECOMPILER_PY:
         cp(os.path.join(ROOT, f), os.path.join(rc, f))
     cp(os.path.join(ROOT, 'beyond', 'beyond_setup.py'), os.path.join(rc, 'beyond_setup.py'))
-    for f in ('beyond_patches.json', 'romfs_beyond.manifest', 'shader-list.bin'):
-        if f in ('beyond_patches.json', 'shader-list.bin') and not os.path.isfile(os.path.join(ROOT, 'beyond', f)):
+    for f in ('beyond_patches.json', 'romfs_beyond.manifest', 'shader-list.bin', 'pipe-list.bin'):
+        if f in ('beyond_patches.json', 'shader-list.bin', 'pipe-list.bin') and not os.path.isfile(os.path.join(ROOT, 'beyond', f)):
             continue   # no game-code patches yet: setup compiles the code as translated (as linux/make_appimage.sh);
                        # shader-list.bin: the shader variants play met (IDs and jump-table values, no game code), built
                        # ahead from the player's own files at each start (runtime/gpu_gl.c seed_ans_pass)
+                       # pipe-list.bin: the draw states play met (program keys, target and blend state), warmed
+                       # before play (runtime/gpu_gl.c pipes_merge_release)
         cp(os.path.join(ROOT, 'beyond', f), os.path.join(rc, 'beyond', f))
     for f in ('cpu.h', 'cpu_helpers.c'):
         cp(os.path.join(ROOT, 'runtime', f), os.path.join(rc, 'runtime', f))

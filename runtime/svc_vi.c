@@ -92,7 +92,9 @@ static int binder_transact(u32 id, u32 code, PR* in, PW* out){
         if(!g_snxvk_on || !nw) for(u32 i=0;i<nf;i++){ u32 id,val; memcpy(&id,qi+0x34+i*8,4); memcpy(&val,qi+0x38+i*8,4); if(id!=0xFFFFFFFFu){ u64 f0=plat_ns(); int ok=syncpt_wait(id,val,100000000); u64 fw=plat_ns()-f0;
             if(fw>50000000ull) LOG("vi: QUEUE_BUFFER fence %u: syncpt %u wanted %u, now %u, waited %.0f ms%s\n",i,id,val,syncpt_read(id),fw/1e6,ok? "" : " (timed out)"); } } }
       if(len>=0x28){ extern volatile i32 g_vi_crop[4]; extern volatile u32 g_vi_transform; i32 cr[4]; memcpy(cr,qi+0x0C,16); for(int i=0;i<4;i++) g_vi_crop[i]=cr[i]; memcpy((void*)&g_vi_transform,qi+0x20,4);
-        { static u32 lt=0xFFFFFFFFu; static i32 lc[4]; if(lt!=g_vi_transform || memcmp(lc,cr,16)){ lt=g_vi_transform; memcpy(lc,cr,16); LOG("vi: crop (%d,%d)-(%d,%d) transform %x\n",cr[0],cr[1],cr[2],cr[3],lt); } } }
+        { static u32 lt=0xFFFFFFFFu; static i32 lc[4]; if(lt!=g_vi_transform || memcmp(lc,cr,16)){ lt=g_vi_transform; memcpy(lc,cr,16); LOG("vi: crop (%d,%d)-(%d,%d) transform %x\n",cr[0],cr[1],cr[2],cr[3],lt);
+            if(getenv("SWR_TEST_CROP_STACK")){ u64 g_main_base=g_mod->mods[0].base; KThread* me=kthread_cur(); if(me){ CPU* c=&me->cpu; u64 fp=c->x[29]; LOG("vi: crop from lr=main+%llx\n",(unsigned long long)(c->x[30]-g_main_base));
+              for(int k=0;k<14&&fp;k++){ MemBlock b; mem_query(fp,&b); if(!(b.perm&PERM_R)||fp<b.addr||fp+16>b.addr+b.size) break; u64 nx=gr64(fp),ret=gr64(fp+8); LOG("vi: crop stack[%d]=main+%llx\n",k,(unsigned long long)(ret-g_main_base)); if(nx<=fp) break; fp=nx; } } } } } }
       if(slot>=0 && slot<64){ u64 p0=plat_ns(); present_slot(slot); u64 pt=plat_ns()-p0; if(pt>250000000ull) LOG("vi: QUEUE_BUFFER present took %.0f ms\n",pt/1e6); }
       pm_lock(&g_vilock); if(slot>=0 && slot<64) slots[slot].queued=0; pc_broadcast(&g_free_cv); pm_unlock(&g_vilock);
       kevent_signal(g_bufavail_ev);
@@ -166,10 +168,16 @@ static SvcObj* new_vi(void){ return svcobj_new("vi",vi_root,0); }
 
 void vi_vsync_tick(void){ kevent_signal(g_vsync_ev); }
 
+/* the screen size the game is told (TV or handheld); SWR_TEST_DISPRES=WxH tries another shape */
+void disp_res(int* w,int* h){
+  static int tw=-1,th=0; if(tw<0){ tw=0; const char* e=getenv("SWR_TEST_DISPRES"); if(e && sscanf(e,"%dx%d",&tw,&th)!=2) tw=0; }
+  if(tw>0 && th>0){ *w=tw; *h=th; return; }
+  *w= g_opt_docked? 1920 : 1280; *h= g_opt_docked? 1080 : 720; }
+
 void svc_vi_init(void){
   pm_init(&g_vilock); pc_init(&g_free_cv);
   g_vsync_ev=kevent_new("vsync",0); g_bufavail_ev=kevent_new("buffer",0); kevent_signal(g_bufavail_ev);
   kobj_ref(&g_vsync_ev->o); kobj_ref(&g_bufavail_ev->o);   /* kept by the runtime, see svc_core_init */
-  if(g_opt_docked){ g_width=1920; g_height=1080; }
+  disp_res(&g_width,&g_height);
   svc_register("vi:u",new_vi); svc_register("vi:s",new_vi); svc_register("vi:m",new_vi);
 }

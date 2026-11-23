@@ -205,7 +205,8 @@ void kernel_run_main(u64 entry, u64 stack_size, int prio, int core){
 void process_exit(int code){
   g_exiting=1; LOG("The game exited (code %d)\n",code);
   { extern void snxvk_closed(void); snxvk_closed(); }   /* the game's own exit is a proper close too */
-  log_flush(); fflush(NULL); { extern void launcher_on_exit(void); launcher_on_exit(); } exit(code);
+  log_flush(); fflush(NULL); { extern void launcher_on_exit(void); launcher_on_exit(); }
+  { extern void plat_prof_quiesce(void); plat_prof_quiesce(); } exit(code);
 }
 
 /* ============================================================ kernel mutex arbitration */
@@ -730,6 +731,7 @@ void swr_svc(CPU* c, u32 imm){
   if(imm==0xFFE9){ extern void aim_cam_hook(CPU*); aim_cam_hook(c); return; }   /* the camera turn's yaw rate and pitch */
   if(imm==0xFFEA){ extern void aim_cam_entry(CPU*); aim_cam_entry(c); return; }   /* its start: the step's frame time */
   if(imm==0xFFE4){ extern void aim_ctl_hook(CPU*); aim_ctl_hook(c); return; }   /* the player control's look stick values */
+  if(imm>=0xFFD0 && imm<=0xFFD6){ extern void uw_hook(CPU*,int); uw_hook(c,(int)(imm-0xFFD0)); return; }   /* ultrawide picture size (cheats.c) */
   if(imm==0xFFE0){ extern int g_opt_green10; if(g_opt_green10){ long long v=(long long)(int)(u32)c->x[9]*10; if(v>0x7FFFFFFFll) v=0x7FFFFFFFll;
       V128* p=&c->v[0]; p->d[0]=0; p->d[1]=0; p->f[0]=(f32)(int)v; static int said; if(said<8){ said++; LOG("mods: Green Energy award %d -> %lld\n",(int)(u32)c->x[9],v); } } return; }
   u64 a0=c->x[0],a1=c->x[1],a2=c->x[2];

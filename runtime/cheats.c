@@ -279,14 +279,47 @@ static void fov_load(void){
 float g_opt_aspect=0;
 static float g_aspect_now=1;   /* what the picture is widened by on screen: the ratio in force / (16/9) */
 float aspect_stretch(void){ return g_aspect_now; }
-static void aspect_tick(void){
-  static const struct { const char* bid; u64 off; } known[]={ {"8275FBE1EC5191C2",0x13d5730} };
-  static int said; u64 off=0; int have=0;
-  for(u32 k=0;k<sizeof known/sizeof known[0];k++) if(!strcmp(g_bid,known[k].bid)){ off=known[k].off; have=1; }
+
+/* the wide picture itself (issue 17, 2026-11-22): the game builds its 1600x900 output (and the 1920x1080 screen size it
+   crops to) from constants in its code. beyond_patches.json adds a call after each one, so with a wider ratio the game
+   renders a real wide picture: 3200x900 at 32:9, its HUD and menus laid out for it, nothing stretched afterwards
+   (stretching the 16:9 picture made the HUD and the map twice as wide). Worked out once, at the first call; a change
+   takes effect after a restart, as the game makes its pictures once. 16:9 and narrower leave the game's numbers alone */
+static int g_uw_w, g_uw_dw; static volatile int g_uw_used;
+static float uw_ratio(void){
   float want=g_opt_aspect;
   if(want<0){ extern void backend_window_size(int*,int*); int w=0,h=0; backend_window_size(&w,&h); want= w>0&&h>0? (float)w/(float)h : 0; }
   if(want<=0) want=16.0f/9.0f;
   if(want<1.25f) want=1.25f; if(want>4.0f) want=4.0f;
+  return want; }
+static void uw_size(void){ if(g_uw_w) return;
+  extern int g_opt_docked; float a=uw_ratio(); int w=1600;
+  if(g_opt_docked && a>16.0f/9.0f+0.01f){ w=((int)(900.0f*a+4.0f))&~7; if(w>3600) w=3600; }
+  g_uw_dw= w==1600? 1920 : ((w*6/5)+7)&~7; g_uw_w=w;
+  if(w!=1600) LOG("aspect: the game renders %dx900 (screen %dx1080)\n",w,g_uw_dw); }
+static volatile int g_uw_ortho;   /* the overlay camera was widened: its panels are pushed to the edges (gpu_gl.c sh_edge) */
+float uw_overlay_k(void){ return g_uw_ortho? (float)g_uw_w/1600.0f : 0.0f; }
+/* how much wider the game's picture is than 16:9 (0 = not widened): gpu_gl.c uw_draw_kind */
+float uw_k(void){ return g_uw_used && g_uw_w>1600? (float)g_uw_w/1600.0f : 0.0f; }
+/* k: 0..3 = the output width into x0, x8, x9, x19 (the height is in the upper half, kept); 4 = the screen width into
+   x9; 5 = the check that the screen size is still set: x9 holds the stored width, made to read 1920 when it is ours */
+void uw_hook(CPU* c, int k){ uw_size(); g_uw_used=1;
+  static const int reg[4]={0,8,9,19};
+  if(k<4){ u64* r=&c->x[reg[k]]; *r=(*r&0xFFFFFFFF00000000ull)|(u32)g_uw_w; return; }
+  if(k==4){ c->x[9]=(c->x[9]&0xFFFFFFFF00000000ull)|(u32)g_uw_dw; return; }
+  if(k==5){ u32 v=(u32)c->x[9]; c->x[9]= v==(u32)g_uw_dw? 1920 : v==1920? 0 : v; return; }
+  /* the game's 2D-overlay cameras (the menus' 3D icon bar, the map's frame): orthographic, 16 x 9 units (left 8, right
+     -8), so on the wide picture they came out twice as wide at 32:9. 6: the pair 8, -8 packed in x9 */
+  float kx=(float)g_uw_w/1600.0f; if(kx==1.0f) return;
+  if(k==6){ u64 v=c->x[9]; if(v==0xC100000041000000ull){ g_uw_ortho=1; float l=8.0f*kx, r=-8.0f*kx; u32 a,b; memcpy(&a,&l,4); memcpy(&b,&r,4); c->x[9]=((u64)b<<32)|a; } return; } }
+
+static void aspect_tick(void){
+  static const struct { const char* bid; u64 off; } known[]={ {"8275FBE1EC5191C2",0x13d5730} };
+  static int said; u64 off=0; int have=0;
+  for(u32 k=0;k<sizeof known/sizeof known[0];k++) if(!strcmp(g_bid,known[k].bid)){ off=known[k].off; have=1; }
+  float want=uw_ratio();
+  /* the game renders the wide picture itself: its cameras use that picture's exact shape, and it is shown as it is */
+  int wide= g_uw_used && g_uw_w!=1600; if(wide) want=(float)g_uw_w/900.0f;
   if(!have){ if(!said && g_opt_aspect!=0){ said=1; LOG("aspect: no known place for build %s: the picture stays 16:9\n",g_bid); } g_aspect_now=1; return; }
   u64 cur=0; if(!rd(g_main_base+off,4,&cur)){ if(!said){ said=1; LOG("aspect: main+%llx can't be read: the picture stays 16:9\n",(unsigned long long)off); } g_aspect_now=1; return; }
   float f; u32 c32=(u32)cur; memcpy(&f,&c32,4);
@@ -296,7 +329,9 @@ static void aspect_tick(void){
   if(f!=want){ u32 o32; memcpy(&o32,&want,4); memcpy(GP(g_main_base+off),&o32,4);
     /* after a change while playing the game puts its own value back every frame: logged once per change and every 10 s */
     static float lw; static u64 lt; u64 now=plat_ns(); if(want!=lw || now-lt>10000000000ull){ lw=want; lt=now; LOG("aspect: %g (was %g)\n",want,f); } }
-  g_aspect_now=want/(16.0f/9.0f); }
+  g_aspect_now= wide? 1.0f : want/(16.0f/9.0f); }
+
+
 
 /* The field of view hook in the game's code (metroid_perf.py, v1.1.0): the projection builder asks for a factor on its
    half field of view, with its caller's return address. The camera's own callers lie in three ranges of main (those
