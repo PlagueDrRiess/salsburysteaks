@@ -310,6 +310,10 @@ void dma_method(GpuChannel* ch, u32 m, u32 v){
       /* the part of a block-linear source this copy reads, so a depth target needn't come back whole */
       extern u32 g_dma_rect[5]; if(!src_linear && !sz_ && !r[0x1CE] && r[0x1CD]<=1){ g_dma_rect[0]=sx*(remap?bpp:1); g_dma_rect[1]=sy; g_dma_rect[2]=line_len; g_dma_rect[3]=lines; g_dma_rect[4]=sw*(remap?bpp:1); }
       if(src!=dst) gpu_gl_rt_flush_read(src); else gpu_gl_rt_flush(src); g_dma_rect[2]=0; u64 t1=plat_ns(); gpu_gl_rt_flush(dst); u64 t2=plat_ns();
+      { /* test only (developer builds): SWR_TEST_WATCH_DEPTH=1 watches who reads the 120x100 depth patch the game copies out */
+        static int w=-1; if(w<0) w=getenv("SWR_TEST_WATCH_DEPTH")!=NULL;
+        if(w==1 && dst_linear && line_len==480 && lines==100){ w=2; u64 g=gmmu_translate(dst+240+50*(u64)pitch_out); extern void wp_arm_rw(u64);
+          LOG("dma: watching reads of the depth patch at gpu %llx = guest %llx\n",(unsigned long long)dst,(unsigned long long)g); if(g) wp_arm_rw(g); } }
       if(t2-t0>10000000ull){ static int said; if(said<30){ said++; LOG("dma: flush src %.1f ms dst %.1f ms (%s %llx -> %s %llx, len %u lines %u, src %ux%u)\n",(t1-t0)/1e6,(t2-t1)/1e6,src_linear?"lin":"bl",(unsigned long long)src,dst_linear?"lin":"bl",(unsigned long long)dst,line_len,lines,sw,sh); } } } }
   u8* dpp=NULL; u8* spp=NULL; u64 dspan=0, sspan=0; (void)spp; (void)sspan;
   if(remap && (r[0x1C2]&7)==4 && dst_linear){

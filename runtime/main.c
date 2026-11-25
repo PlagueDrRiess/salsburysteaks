@@ -131,6 +131,39 @@ static volatile u64 g_vt_max;
 
 static u64 guest_ns_raw(u64 r){ return g_vt_av+(u64)((double)(r-g_vt_ar)*g_vt_s); }
 
+/* Stall-aware clock (issue 8, 2026-11-23): when the GPU thread is stuck on one piece of work for over 50 ms (the
+   driver building a shader, a wait for the GPU), the game's clock stops until that work is done, then runs on from
+   where it stopped. The game sees a short pause, as a console that slowed down would, instead of time going by: a
+   cutscene, which keeps itself on the clock, raced to catch up after a freeze and its sound fell out of step (an RTX
+   4080 froze 3-13 s at a scene cut on shaders our lists don't have). Only GPU work holds it: when the game itself is
+   busy its clock runs, so a game waiting for time to pass is never stuck. One hold lasts 30 s at most.
+   [Performance] clock_hold=0 or SWR_NO_CLOCK_HOLD=1: off */
+int g_opt_clock_hold=1;
+volatile u64 g_gpu_work_t0;   /* gpu_gl.c: when the GPU thread started its current work item (0: idle) */
+static volatile u32 g_ch_seq; static volatile u64 g_ch_start, g_ch_total; static volatile int g_ch_used; static PMutex g_ch_m;
+static u64 ch_adj(u64 now){   /* how far the game's clock is behind real time at host time now */
+  for(;;){ u32 s1=__atomic_load_n(&g_ch_seq,__ATOMIC_ACQUIRE); if(s1&1){ plat_yield(); continue; }
+    u64 st=__atomic_load_n(&g_ch_start,__ATOMIC_RELAXED), tot=__atomic_load_n(&g_ch_total,__ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    if(__atomic_load_n(&g_ch_seq,__ATOMIC_RELAXED)==s1) return tot+(st && now>st? now-st : 0); } }
+u64 clock_hold_adj(void){ return g_ch_used? ch_adj(plat_ns()) : 0; }   /* main.c audio: the sound mixes on this clock */
+static void ch_set(u64 st, u64 tot){ __atomic_add_fetch(&g_ch_seq,1,__ATOMIC_ACQ_REL); __atomic_store_n(&g_ch_start,st,__ATOMIC_RELAXED); __atomic_store_n(&g_ch_total,tot,__ATOMIC_RELAXED); __atomic_add_fetch(&g_ch_seq,1,__ATOMIC_ACQ_REL); }
+static u64 g_ch_n, g_ch_sum, g_ch_max, g_ch_lt;
+static void ch_log(u64 d){ g_ch_n++; g_ch_sum+=d; if(d>g_ch_max) g_ch_max=d; u64 now=plat_ns();
+  if(d>500000000ull || now-g_ch_lt>10000000000ull){ g_ch_lt=now; LOG("clock: held %u times for the GPU, %.0f ms in all, %.0f ms the longest (this one %.0f ms)\n",(unsigned)g_ch_n,g_ch_sum/1e6,g_ch_max/1e6,d/1e6); } }
+void clock_hold_release(void){
+  if(!__atomic_load_n(&g_ch_start,__ATOMIC_ACQUIRE)) return;
+  pm_lock(&g_ch_m); u64 st=g_ch_start; if(st){ u64 d=plat_ns()-st; ch_set(0,g_ch_total+d); ch_log(d); } pm_unlock(&g_ch_m); }
+static void clock_hold_thread(void* a){ (void)a;
+  for(;;){ plat_sleep_ns(2000000);
+    u64 t0=__atomic_load_n(&g_gpu_work_t0,__ATOMIC_ACQUIRE), now=plat_ns();
+    if(!g_ch_start){ if(t0 && now>t0 && now-t0>50000000ull){ pm_lock(&g_ch_m);
+        if(!g_ch_start && __atomic_load_n(&g_gpu_work_t0,__ATOMIC_ACQUIRE)==t0){ g_ch_used=1; ch_set(now,g_ch_total); } pm_unlock(&g_ch_m); } }
+    else if(now-g_ch_start>30000000000ull) clock_hold_release(); } }   /* 30 s: let time run again */
+static void clock_hold_start(void){ static int on; if(on) return; on=1;
+  if(!g_opt_clock_hold || getenv("SWR_NO_CLOCK_HOLD")){ LOG("clock: holding for GPU stalls is off\n"); return; }
+  pm_init(&g_ch_m); plat_thread(clock_hold_thread,NULL,64*1024); LOG("clock: the game's clock waits while the GPU thread is stuck over 50 ms (clock_hold=0: off)\n"); }
+
 /* Fast forward: while active the guest clock runs g_ff_s times faster than real time (elevator and other
    rides are fixed-length animations driven by the game's measured delta time). Kept as an accumulated
    offset so the clock never steps back when it is switched on or off. Unused until switched on. */
@@ -151,7 +184,7 @@ static void ff_poll(void){ static double cur=1.0; static int on, seen, pad_prev;
     { extern void backend_ff_status(int,int); backend_ff_status(want>1.0,(int)want); } } }
 
 u64 guest_ns(void){
-  u64 r=plat_ns()-g_t0, v;
+  u64 hn=plat_ns(), r=hn-g_t0, v; if(g_ch_used) r-=ch_adj(hn);   /* the stall-aware clock (above) */
   if(!g_vt_mi){ v=r; if(g_ff_used){ pm_lock(&g_ff_m); v=r+ff_off(r); pm_unlock(&g_ff_m); } } else { pm_lock(&g_vt_m); v=guest_ns_raw(r); pm_unlock(&g_vt_m); }
   u64 m=__atomic_load_n(&g_vt_max,__ATOMIC_RELAXED);
   while(v>m){ if(__atomic_compare_exchange_n(&g_vt_max,&m,v,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) return v; }
@@ -190,7 +223,9 @@ u64 g_t0_ticks;   /* tick-domain counterpart of g_t0, taken right after it */
    which the game's busy-wait frame limiter hammers) and a second double multiply. Same epoch, same
    19.2 MHz rate, same truncation. The F7 smooth-recording clock (g_vt_mi) keeps the old path. */
 static u64 rt_ticks(void){
-  u64 value= LIKELY(!g_vt_mi && !g_ff_used)? plat_ticks_raw()-g_t0_ticks : (u64)((double)guest_ns()*0.0192);
+  u64 value= LIKELY(!g_vt_mi && !g_ff_used && !g_ch_used)? plat_ticks_raw()-g_t0_ticks : (u64)((double)guest_ns()*0.0192);
+  if(UNLIKELY(g_ch_used)){ static volatile u64 mx; u64 m=__atomic_load_n(&mx,__ATOMIC_RELAXED);   /* never back, across the switch to this path */
+    while(value>m){ if(__atomic_compare_exchange_n(&mx,&m,value,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED)) break; } if(value<m) value=m; }
   /* Observation only: layout resolved from F_8085CB8 in this game's C.
      No clock changes or sleeps; validate mapped storage before reading. */
   {static int checked;static FILE*f;static int frame=-1;static u64 polls;
@@ -355,6 +390,7 @@ static void ini_apply(const char* k, const char* v){
     else if(!strcmp(k,"save_set")){   /* a folder name only: nothing that leaves save/sets */
       if(strlen(v)<sizeof g_opt_save_set && !strpbrk(v,"/\\:*?\"<>|") && !strstr(v,"..")) strcpy(g_opt_save_set,v); else g_opt_save_set[0]=0; }
     else if(!strcmp(k,"profile")) g_opt_prof=atoi(v);
+    else if(!strcmp(k,"clock_hold")) g_opt_clock_hold=atoi(v);
     else if(!strcmp(k,"low_priority_shader_compiler")) g_opt_cmp_low=atoi(v);
 #if !defined(__ANDROID__)
     else if(!strcmp(k,"shader_threads")){ extern int g_opt_shader_threads; g_opt_shader_threads=atoi(v); if(g_opt_shader_threads<-1) g_opt_shader_threads=-1;   /* -1: none (backend_win32.c) */ if(g_opt_shader_threads>8) g_opt_shader_threads=8; }   /* backend_x11.c, backend_win32.c */
@@ -547,6 +583,7 @@ static const IniOpt INI_REC[]={
 static const IniOpt INI_DBG[]={
   {"log","1","Log detail: 1 = normal, 2 = everything (slow)"},
   {"diag","0","1 = automatic diagnostic dumps (F5 always works)"},
+  {"clock_hold","1","1 = the game's clock waits while the GPU is stuck (a shader built on the spot): a cutscene pauses for a\n;   moment instead of racing to catch up, and its sound stays with the picture. 0 = off"},
   {"profile","0","1 = write profile.txt every 10 seconds (CPU profiler)"},
   {NULL,NULL,NULL}};
 #ifndef SWR_RELEASE
@@ -724,7 +761,7 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   { /* A/V hold (svc_core.c audio_clock): a hitch of 40-400 ms puts the images that much behind the sound; the sound's
        clock is held back by the same amount so the images catch up. Longer gaps are loads, which the game times itself */
     static int on=-1; static u64 last; if(on<0) on=!getenv("SWR_NO_AV_HOLD"); u64 now=plat_ns();
-    if(on && last && !g_vt_on){ u64 dt=now-last; if(dt>40000000ull && dt<400000000ull){   /* over 40 ms: a hitch, not a slower PC's steady pace */ extern volatile long long g_av_hold_ns;
+    if(on && last && !g_vt_on && !g_ch_used){ u64 dt=now-last;   /* the stall-aware clock covers GPU stalls itself */ if(dt>40000000ull && dt<400000000ull){   /* over 40 ms: a hitch, not a slower PC's steady pace */ extern volatile long long g_av_hold_ns;
         long long h=__atomic_add_fetch(&g_av_hold_ns,(long long)(dt-16666667ull),__ATOMIC_RELAXED); if(h>1000000000ll) __atomic_store_n(&g_av_hold_ns,1000000000ll,__ATOMIC_RELAXED);
         static u64 tot, n, lt; tot+=dt-16666667ull; n++; if(now-lt>10000000000ull){ lt=now; LOG("a/v hold: %llu hitches so far, the sound waited %.0f ms in all for the images to catch up\n",(unsigned long long)n,tot/1e6); } } }
     last=now; }
@@ -962,6 +999,7 @@ int swr_main(int argc, char** argv){
   services_init(); romfs_init(); gpu_init(); { extern void snxvk_gpu_init(void); snxvk_gpu_init(); }
   video_init(g_mod->title? g_mod->title : g_exename);
   { extern void plat_prof_start(int); if(g_opt_prof){ plat_prof_start(0); LOG("profile: active (profile.txt every 10 s)\n"); } }
+  clock_hold_start();
   kernel_run_main(g_mod->mods[0].base+g_mod->mods[0].text_off,g_mod->main_stack?g_mod->main_stack:0x100000,(int)g_mod->main_prio,(int)g_mod->main_core);
   plat_thread_diag_start();
   /* 60Hz frontend loop */
@@ -1069,7 +1107,7 @@ int audren_update(SvcObj* o, IpcCtx* c){
   /* Several updates within 5 ms mix nothing (status only): Metroid Prime 4 calls RequestUpdate about 20000 times a
      second for half a second during a transition, and one block per call made 50 s of sound for a 160 ms queue (11735
      blocks dropped, the sound out of step afterwards). Audio advances with real time only, as on the console */
-  { u64 now=plat_ns(); u32 blocks=1; double owed=0;
+  { u64 now=plat_ns()-clock_hold_adj(); u32 blocks=1; double owed=0;   /* on the game's clock: no sound owed while it is held */
     if(o->u[6]){ memcpy(&owed,&o->u[7],8); owed+=(double)(now-o->u[6])/5000000.0;
       /* Late by more than 40 ms: the rest used to be thrown away (owed>8 -> 8), so sound lost that time for good: 4.2 s in an 18
          minute session, voices behind the animation after every hitch (the F5 capture alone cost 0.25 s). On the console the

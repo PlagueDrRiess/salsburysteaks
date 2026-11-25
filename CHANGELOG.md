@@ -4,6 +4,22 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.35
+
+### Fewer freezes when a cutscene brings in new shaders (issue 8, RecompLauncher reports)
+On NVIDIA, the first time a newly loaded shader was used, the game waited 225-330 ms for the driver to finish loading
+it. A cutscene brings in a batch at once, and those waits added up to 2-4 second freezes. The background shader loader
+now does that first step itself, off the thread that draws the game, for shaders from earlier runs and for new ones.
+
+### The game's clock waits out a GPU stall
+When the graphics driver holds things up for more than 50 ms (building a shader, for example), the game's clock now
+pauses until it is done. A cutscene pauses for that moment instead of racing ahead to catch up, and its sound stays
+with the picture. `clock_hold=0` in the ini turns it off.
+
+### Smoother play in busy scenes
+- Geometry the game rewrites every frame (debris, particles) is uploaded without checking it first.
+- Creating a render target no longer makes the game wait for the graphics driver.
+
 ## 2026.11.34
 
 ### Laptops use their dedicated graphics card (issue 32)
