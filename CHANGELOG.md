@@ -4,6 +4,13 @@ Fixes and changes per release. Found a problem? Please use the
 [bug report form](../../issues/new?template=bug_report.yml) and attach `Metroid Prime 4 Beyond.log`: it holds the
 timings and errors needed to trace most issues, and one report per problem keeps each one easy to track.
 
+## 2026.11.34
+
+### Laptops use their dedicated graphics card (issue 32)
+On a laptop with two GPUs the game could run on the processor's built-in graphics (Intel UHD) instead of the
+NVIDIA or AMD card: shaders took very long to build and Intel's driver crashed while compiling one. The game now asks
+the NVIDIA and AMD drivers for the dedicated card, as PC games do.
+
 ## 2026.11.33
 
 ### Scanning works with the mouse again

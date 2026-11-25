@@ -11,6 +11,12 @@
 #include <windows.h>
 #include <mmsystem.h>  /* timeBeginPeriod (windows.h leaves it out with WIN32_LEAN_AND_MEAN) */
 
+/* Laptops with two GPUs: these exports ask the NVIDIA and AMD drivers for the dedicated one. Without them a laptop with
+   an RTX 3050 ran the game on its Intel UHD graphics: shaders built very slowly and Intel's OpenGL driver crashed while
+   compiling one (issue 32, 2026-11-23) */
+__declspec(dllexport) DWORD NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+
 static HWND g_hwnd; static HDC g_hdc, g_wdc[8]; static HGLRC g_ctx, g_wctx[8]; static int g_nwctx; static volatile int g_wnext;
 /* shader compile threads (gpu_gl.c worker_start): NVIDIA's Windows driver has no GL_KHR_parallel_shader_compile and
    compiles GLSL on the thread that asks, so each thread gets its own context sharing the game's, as on Linux
